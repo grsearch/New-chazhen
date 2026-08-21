@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Same-Slot Dump Backrun Research</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1014; --panel:#121a20; --line:#26333c; --text:#e7eef2; --muted:#8da0ac; --good:#50d890; --bad:#ff6b6b; --accent:#72b7ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px/1.45 Inter,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1440px; margin:auto; padding:24px; }
+    header { display:flex; justify-content:space-between; gap:16px; align-items:end; margin-bottom:20px; }
+    h1 { font-size:24px; margin:0; }
+    h2 { font-size:16px; margin:0 0 12px; }
+    p { color:var(--muted); margin:6px 0 0; }
+    .badge { padding:6px 10px; border:1px solid var(--line); border-radius:999px; color:var(--good); white-space:nowrap; }
+    .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:18px; }
+    .card,.panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; }
+    .card { padding:14px; }
+    .label { color:var(--muted); font-size:12px; }
+    .value { font-size:23px; margin-top:5px; font-variant-numeric:tabular-nums; }
+    .panel { padding:16px; margin-bottom:18px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; white-space:nowrap; }
+    th,td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums; }
+    th:first-child,td:first-child { text-align:left; }
+    th { color:var(--muted); font-size:12px; font-weight:500; }
+    .good { color:var(--good); } .bad { color:var(--bad); }
+    code { color:var(--accent); }
+    @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Post-Dump Recovery / Toxic Flow Filter</h1><p>只研究恢复确认后的可执行回测；不会签名或发送交易。</p></div>
+    <div class="badge" id="status">读取中</div>
+  </header>
+  <section class="cards" id="cards"></section>
+  <section class="panel"><h2>延迟 × 仓位 × 退出组合</h2><table id="cohorts"></table></section>
+  <section class="panel"><h2>最近砸盘事件</h2><table id="dumps"></table></section>
+</main>
+<script>
+const fmt=(v,d=2)=>v==null?'—':Number(v).toFixed(d);
+const pct=v=>v==null?'—':`${fmt(v)}%`;
+const cell=(v,c='')=>`<td class="${c}">${v}</td>`;
+async function refresh(){
+  try{
+    const [summary,dumps,health]=await Promise.all([
+      fetch('/api/summary').then(r=>r.json()),fetch('/api/dumps?limit=30').then(r=>r.json()),fetch('/api/health').then(r=>r.json())
+    ]);
+    document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'}`;
+    const d=summary.dumps,e=summary.execution;
+    const cards=[['独立砸盘事件',d.independent],['下一 Slot 恢复率',pct(d.nextSlotRecoveryRatePct)],['严格排序覆盖',pct(d.strictOrderingCoveragePct)],['二次砸盘率',pct(d.secondDumpRatePct)],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['扣费 PF',fmt(e.profitFactor)]];
+    document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
+    document.querySelector('#cohorts').innerHTML='<tr><th>组合</th><th>样本</th><th>Entry</th><th>Exit</th><th>NO_EXIT</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+summary.cohorts.slice(0,200).map(r=>{
+      const ret=r.averageNetReturnPct; return `<tr><td><code>${r.recoveryProfileId}/${r.entryVariantId}/${r.positionSol}/${r.exitProfileId}</code></td>${cell(r.scheduled)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(pct(r.winRatePct))}${cell(pct(ret),ret>0?'good':ret<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+    }).join('');
+    document.querySelector('#dumps').innerHTML='<tr><th>时间 / Mint</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+dumps.map(r=>`<tr><td>${new Date(r.detected_at_ms).toLocaleTimeString()} · <code>${(r.mint||'').slice(0,8)}…</code></td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join('');
+  }catch(e){document.querySelector('#status').textContent=`读取失败: ${e.message}`}
+}
+refresh(); setInterval(refresh,5000);
+</script>
+</body>
+</html>

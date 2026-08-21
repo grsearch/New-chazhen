@@ -1,0 +1,23 @@
+{
+  "name": "same-slot-dump-backrun-research",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Research-only Post-Dump Recovery and Toxic Flow Filter for PumpSwap.",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "replay": "node scripts/replay-jsonl.js",
+    "test": "node --test --test-isolation=none",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "@triton-one/yellowstone-grpc": "^5.0.8",
+    "better-sqlite3": "13.0.1",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
