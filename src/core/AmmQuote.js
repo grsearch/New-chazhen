@@ -29,13 +29,20 @@ function effectiveReserves(trade = {}) {
 }
 
 function feeBps(trade = {}) {
+  // PumpSwap's official SDK prices swaps with the LP, protocol, and coin-creator
+  // fee components. buyback_fee_basis_points is a fee-allocation/share field;
+  // it is preserved by the parser for research, but is not an additional fee on
+  // the swap amount.
   const total = [
     trade.lpFeeBasisPoints,
     trade.protocolFeeBasisPoints,
     trade.coinCreatorFeeBasisPoints,
-    trade.buybackFeeBasisPoints,
   ].reduce((sum, value) => sum + Math.max(0, finite(value, 0)), 0);
   return Math.min(9_000, total);
+}
+
+function protocolFeeBps(trade = {}) {
+  return Math.max(0, finite(trade.protocolFeeBasisPoints, 0));
 }
 
 function reservePrice(trade = {}) {
@@ -74,7 +81,8 @@ function quoteBuy(trade, spendSol, { slippageBps = 0 } = {}) {
     userInputSol: spend,
     impactPct: marketPrice > 0 ? (price / marketPrice - 1) * 100 : null,
     liquidityUsagePct: Number(inputRaw) / Number(reserves.quoteRaw) * 100,
-    protocolFeeBps: protocolBps,
+    protocolFeeBps: protocolFeeBps(trade),
+    totalFeeBps: protocolBps,
     slippageBps: slip,
     reserveSource: reserves.source,
   };
@@ -107,7 +115,8 @@ function quoteSell(trade, tokenUnits, { slippageBps = 0 } = {}) {
     quoteOutRaw: userOutRaw.toString(),
     impactPct: marketPrice > 0 ? (price / marketPrice - 1) * 100 : null,
     liquidityUsagePct: Number(inputRaw) / Number(reserves.baseRaw) * 100,
-    protocolFeeBps: protocolBps,
+    protocolFeeBps: protocolFeeBps(trade),
+    totalFeeBps: protocolBps,
     slippageBps: slip,
     reserveSource: reserves.source,
   };

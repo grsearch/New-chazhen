@@ -12,6 +12,16 @@ const { RuntimeHealthMonitor } = require('./core/RuntimeHealthMonitor');
 async function main() {
   validateConfig({ requireStream: true });
   const store = new ResearchStore(config.storage);
+  const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
+    'PUMPSWAP_CPMM_EVENT_FEES_V1',
+  ]);
+  if (removedInvalidFeeSimulations > 0) {
+    console.log(`Removed ${removedInvalidFeeSimulations} simulations from the invalid V1 fee model.`);
+  }
+  const removedLegacySimulations = store.deleteSimulationsByPositionSizes([0.02, 0.05, 0.1]);
+  if (removedLegacySimulations > 0) {
+    console.log(`Removed ${removedLegacySimulations} obsolete 0.02/0.05/0.1 SOL simulations.`);
+  }
   const parser = new PumpEventParser({
     pumpProgramId: config.pump.programId,
     pumpAmmProgramId: config.pump.ammProgramId,
