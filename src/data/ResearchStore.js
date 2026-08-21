@@ -45,7 +45,9 @@ function returnStats(rows) {
     averageNetReturnPct: values.length
       ? values.reduce((sum, item) => sum + item, 0) / values.length : null,
     medianNetReturnPct: percentile(values, 0.5),
-    profitFactor: grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? null : 0),
+    profitFactor: values.length
+      ? (grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? null : 0))
+      : null,
     worst5PctAverage: worstCount
       ? ordered.slice(0, worstCount).reduce((sum, item) => sum + item, 0) / worstCount : null,
     largestWinnerContributionPct: winnerContributionPct,
@@ -774,7 +776,12 @@ class ResearchStore {
         COUNT(*) scheduled,
         SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
         SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) exit_filled,
-        SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit
+        SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit,
+        SUM(CASE WHEN status='NO_EXIT' AND rejection_reason='NO_CAUSAL_EXIT_QUOTE'
+          THEN 1 ELSE 0 END) no_exit_quote,
+        SUM(CASE WHEN status='NO_EXIT'
+          AND rejection_reason='NO_TRADE_AT_OR_AFTER_EXIT_HORIZON'
+          THEN 1 ELSE 0 END) no_trade_after_horizon
       FROM simulations
       GROUP BY recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
       ORDER BY recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
@@ -797,6 +804,10 @@ class ResearchStore {
         entryFillRatePct: group.scheduled ? group.entry_filled / group.scheduled * 100 : null,
         exitFillRatePct: group.entry_filled ? group.exit_filled / group.entry_filled * 100 : null,
         noExitRatePct: group.entry_filled ? group.no_exit / group.entry_filled * 100 : null,
+        noExitQuote: group.no_exit_quote,
+        noTradeAfterHorizon: group.no_trade_after_horizon,
+        noExitOther: Math.max(0,
+          group.no_exit - group.no_exit_quote - group.no_trade_after_horizon),
         ...returnStats(rows),
       };
     }).sort(compareCohortPerformance);
@@ -837,6 +848,24 @@ class ResearchStore {
     return this.db.prepare(`
       SELECT * FROM same_slot_observations ORDER BY observed_at_ms DESC LIMIT ?
     `).all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
+  }
+
+  recentSameSlotObservationsPage(page = 1, pageSize = 20) {
+    this.flush();
+    const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
+    const total = this.db.prepare('SELECT COUNT(*) count FROM same_slot_observations').get().count;
+    const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
+    const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
+    const items = this.db.prepare(`
+      SELECT * FROM same_slot_observations ORDER BY observed_at_ms DESC LIMIT ? OFFSET ?
+    `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+    return {
+      items,
+      page: normalizedPage,
+      pageSize: normalizedSize,
+      total,
+      totalPages,
+    };
   }
 
   health() {

@@ -97,6 +97,8 @@ test('COS systemd timer is pinned to 07:00 Beijing time', () => {
   assert.match(upload, /FLOW_BACKUP_COS_BUCKET/);
   assert.match(upload, /schedule=07:00 Asia\/Shanghai/);
   assert.match(installer, /LEGACY_ENV_FILE="\/etc\/flow-acceleration\/backup-cos\.env"/);
+  assert.match(installer, /INSTALL_DIR="\$\{1:-\/home\/ubuntu\/New-chazhen\}"/);
+  assert.doesNotMatch(installer, /\/opt\/new-chazhen/);
   assert.ok(
     installer.indexOf('systemctl enable --now "$TIMER_NAME"')
       < installer.indexOf('systemctl disable --now "$LEGACY_TIMER"'),

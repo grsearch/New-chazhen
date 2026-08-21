@@ -22,6 +22,14 @@ function integer(name, fallback, bounds = {}) {
   return Math.trunc(number(name, fallback, bounds));
 }
 
+function boolean(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(raw.toLowerCase())) return true;
+  if (['0', 'false', 'no', 'off'].includes(raw.toLowerCase())) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 const positionSizesSol = [1, 2, 5];
 
 const config = {
@@ -50,6 +58,15 @@ const config = {
   dashboard: {
     host: process.env.SDBR_DASHBOARD_HOST || '127.0.0.1',
     port: integer('SDBR_DASHBOARD_PORT', 8787, { min: 1, max: 65_535 }),
+  },
+  health: {
+    checkIntervalMs: integer('SDBR_HEALTH_CHECK_MS', 60_000, { min: 5_000 }),
+    healthyLogIntervalMs: integer('SDBR_HEALTH_LOG_MS', 600_000, { min: 60_000 }),
+    startupGraceMs: integer('SDBR_HEALTH_STARTUP_GRACE_MS', 60_000, { min: 0 }),
+    maxEventStaleMs: integer('SDBR_HEALTH_MAX_EVENT_STALE_MS', 120_000, { min: 30_000 }),
+    maxPendingWrites: integer('SDBR_HEALTH_MAX_PENDING_WRITES', 5_000, { min: 1 }),
+    fatalConsecutiveChecks: integer('SDBR_HEALTH_FATAL_CHECKS', 5, { min: 2 }),
+    exitOnFatal: boolean('SDBR_HEALTH_EXIT_ON_FATAL', true),
   },
   slotAssembler: {
     retentionSlots: 8,

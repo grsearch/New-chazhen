@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${1:-/opt/new-chazhen}"
+INSTALL_DIR="${1:-/home/ubuntu/New-chazhen}"
 SERVICE_USER="${SERVICE_USER:-ubuntu}"
 SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "$SERVICE_USER" 2>/dev/null || true)}"
 BACKUP_ENV_FILE="/etc/new-chazhen/backup-cos.env"

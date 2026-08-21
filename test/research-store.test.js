@@ -61,6 +61,10 @@ test('research store batches events and reports NO_EXIT independently', () => {
     ...baseSimulation, simulationId: 'no-exit', status: 'NO_EXIT', entryAtMs: now + 400,
     rejectionReason: 'NO_CAUSAL_EXIT_QUOTE',
   });
+  store.insertSimulation({
+    ...baseSimulation, simulationId: 'no-trade-after-horizon', status: 'NO_EXIT',
+    entryAtMs: now + 400, rejectionReason: 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON',
+  });
   store.flush();
   const summary = store.summary();
   assert.equal(summary.dumps.independent, 1);
@@ -68,10 +72,14 @@ test('research store batches events and reports NO_EXIT independently', () => {
   assert.equal(summary.sameSlotProbe.observations, 1);
   assert.equal(summary.sameSlotProbe.strictAfterDumpBuys, 1);
   assert.equal(summary.sameSlotProbe.executableSignals, 0, 'store must force probe rows to non-executable');
-  assert.equal(summary.execution.scheduled, 2);
+  assert.equal(summary.execution.scheduled, 3);
   assert.equal(summary.execution.exitFilled, 1);
-  assert.equal(summary.execution.noExit, 1);
+  assert.equal(summary.execution.noExit, 2);
   assert.equal(summary.execution.resolved, 1, 'NO_EXIT must not be converted into an invented return');
+  assert.equal(summary.cohorts[0].resolved, 1);
+  assert.equal(summary.cohorts[0].noExitQuote, 1);
+  assert.equal(summary.cohorts[0].noTradeAfterHorizon, 1);
+  assert.equal(summary.cohorts[0].noExitOther, 0);
   store.close();
 });
 
@@ -98,6 +106,45 @@ test('recent dumps use bounded server-side pagination', () => {
   assert.equal(last.items.length, 5);
   assert.equal(last.items.at(-1).episode_id, 'episode-0');
   const bounded = store.recentDumpsPage(99, 1_000);
+  assert.equal(bounded.pageSize, 100);
+  assert.equal(bounded.page, 1);
+  store.close();
+});
+
+test('recent same-slot observations use bounded server-side pagination', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  const insertDump = store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES(?,?,?,?,?,'[]','OBSERVING',0,?)
+  `);
+  const insertObservation = store.db.prepare(`
+    INSERT INTO same_slot_observations(
+      observation_id,episode_id,mint,pool,observed_at_ms,slot,event_index,
+      classification,receive_lag_ms,buy_sol,executable,rejection_reason
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
+  `);
+  for (let index = 0; index < 25; index += 1) {
+    insertDump.run(
+      `episode-${index}`, `mint-${index}`, `pool-${index}`,
+      1_000 + index, 'STRICT', 1_000 + index,
+    );
+    insertObservation.run(
+      `observation-${index}`, `episode-${index}`, `mint-${index}`, `pool-${index}`,
+      1_000 + index, index, 0, 'STRICT_AFTER_DUMP', 10, 1,
+      'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
+    );
+  }
+  const first = store.recentSameSlotObservationsPage(1, 10);
+  const last = store.recentSameSlotObservationsPage(3, 10);
+  assert.equal(first.total, 25);
+  assert.equal(first.totalPages, 3);
+  assert.equal(first.items.length, 10);
+  assert.equal(first.items[0].observation_id, 'observation-24');
+  assert.equal(last.items.length, 5);
+  assert.equal(last.items.at(-1).observation_id, 'observation-0');
+  const bounded = store.recentSameSlotObservationsPage(99, 1_000);
   assert.equal(bounded.pageSize, 100);
   assert.equal(bounded.page, 1);
   store.close();

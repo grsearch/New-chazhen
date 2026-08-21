@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const vm = require('node:vm');
-const { ResearchStore, compareCohortPerformance } = require('../src/data/ResearchStore');
+const {
+  ResearchStore, compareCohortPerformance, returnStats,
+} = require('../src/data/ResearchStore');
 const { DashboardServer } = require('../src/server/DashboardServer');
 
 test('cohorts sort by win rate and then average net return', () => {
@@ -16,6 +18,7 @@ test('cohorts sort by win rate and then average net return', () => {
     { ...highWin, averageNetReturnPct: 5 }, highWin,
   ) < 0, 'average return breaks equal-win-rate ties');
   assert.ok(compareCohortPerformance(highWin, { winRatePct: null, averageNetReturnPct: null }) < 0);
+  assert.equal(returnStats([]).profitFactor, null, 'PF is unknown when no trade has closed');
 });
 
 test('dashboard script parses and exposes paginated GMGN views', () => {
@@ -27,6 +30,11 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.doesNotThrow(() => new vm.Script(script));
   assert.match(source, /const PAGE_SIZE=20/);
   assert.match(source, /pageSize=\$\{PAGE_SIZE\}/);
+  assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
+  assert.match(source, /id="same-slot-pager"/);
+  assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
+  assert.match(source, /<th>CLOSED<\/th>/);
+  assert.match(source, /<th>NO_EXIT原因<\/th>/);
   assert.match(source, /胜率 ↓ · 平均净收益 ↓/);
   assert.match(source, /https:\/\/gmgn\.ai\/sol\/token\/\$\{encodeURIComponent\(value\)\}/);
   assert.match(source, /target="_blank" rel="noopener noreferrer"/);
@@ -43,6 +51,19 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   for (let index = 0; index < 23; index += 1) {
     insert.run(`episode-${index}`, `mint-${index}`, `pool-${index}`, index, 'STRICT', index);
   }
+  const insertSameSlot = store.db.prepare(`
+    INSERT INTO same_slot_observations(
+      observation_id,episode_id,mint,pool,observed_at_ms,slot,event_index,
+      classification,receive_lag_ms,buy_sol,executable,rejection_reason
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
+  `);
+  for (let index = 0; index < 23; index += 1) {
+    insertSameSlot.run(
+      `observation-${index}`, `episode-${index}`, `mint-${index}`, `pool-${index}`,
+      index, index, 0, 'STRICT_AFTER_DUMP', 10, 1,
+      'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
+    );
+  }
   const dashboard = new DashboardServer({
     config: { host: '127.0.0.1', port: 0 }, store, health: () => ({ state: 'TEST' }),
   });
@@ -58,4 +79,16 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   assert.equal(result.totalPages, 3);
   assert.equal(result.items.length, 10);
   assert.equal(result.items[0].episode_id, 'episode-12');
+
+  const sameSlotResponse = await fetch(
+    `http://127.0.0.1:${port}/api/same-slot?page=2&pageSize=10`,
+  );
+  assert.equal(sameSlotResponse.status, 200);
+  const sameSlot = await sameSlotResponse.json();
+  assert.equal(sameSlot.page, 2);
+  assert.equal(sameSlot.pageSize, 10);
+  assert.equal(sameSlot.total, 23);
+  assert.equal(sameSlot.totalPages, 3);
+  assert.equal(sameSlot.items.length, 10);
+  assert.equal(sameSlot.items[0].observation_id, 'observation-12');
 });
