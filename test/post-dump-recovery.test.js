@@ -5,11 +5,17 @@ const assert = require('node:assert/strict');
 const { PostDumpRecoveryEngine } = require('../src/core/PostDumpRecoveryEngine');
 
 class MemoryStore {
-  constructor() { this.dumps = []; this.confirmations = []; this.simulations = new Map(); }
+  constructor() {
+    this.dumps = [];
+    this.confirmations = [];
+    this.sameSlotObservations = [];
+    this.simulations = new Map();
+  }
   listToxicWallets() { return []; }
   recordTrade() {}
   insertDump(dump, toxic) { this.dumps.push({ dump, toxic }); }
   updateDump() {}
+  insertSameSlotObservation(row) { this.sameSlotObservations.push(row); }
   insertConfirmation(row) { this.confirmations.push(row); }
   insertSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
   updateSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
@@ -41,7 +47,7 @@ function configuration() {
       }],
     },
     execution: {
-      positionSizesSol: [0.1],
+      positionSizesSol: [1],
       entryVariants: [{ id: 'E100', kind: 'DELAY', delayMs: 100 }],
       entryTimeoutMs: 2_000, exitDelayMs: 200, exitTimeoutMs: 2_000, exitGraceMs: 2_000,
       quoteModel: 'TEST', buySlippageBps: 0, sellSlippageBps: 0,
@@ -83,10 +89,17 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
 
   observe(trade({ at: base + 100, slot: 501, tx: 2, side: 'BUY', sol: 10, price: 7.5e-8, wallet: 'same-slot', quoteSol: 75, sequence: 3 }));
   assert.equal(store.confirmations.length, 0, 'same-slot capital is statistics-only');
+  assert.equal(store.simulations.size, 0, 'same-slot observations cannot create shadow positions');
+  assert.equal(store.sameSlotObservations.length, 1);
+  assert.equal(store.sameSlotObservations[0].classification, 'STRICT_AFTER_DUMP');
+  assert.equal(store.sameSlotObservations[0].executable, false);
+  assert.equal(store.sameSlotObservations[0].receiveLagMs, 100);
 
   observe(trade({ at: base + 200, slot: 502, tx: 1, side: 'BUY', sol: 1.6, price: 7.3e-8, wallet: 'buyer-a', quoteSol: 73, sequence: 4 }));
+  assert.equal(store.sameSlotObservations.length, 1, 'next-slot buys are not probe observations');
   observe(trade({ at: base + 250, slot: 502, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 5 }));
   assert.equal(store.confirmations.length, 1, 'two independent buyers and real recovery should confirm R1');
+  assert.ok([...store.simulations.values()].every((row) => row.positionSol === 1));
   assert.ok([...store.simulations.values()].every((row) => row.status === 'PENDING_ENTRY'));
 
   observe(trade({ at: base + 300, slot: 502, tx: 3, side: 'BUY', sol: 0.1, price: 7.8e-8, wallet: 'noise', quoteSol: 78, sequence: 6 }));
@@ -101,6 +114,37 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   assert.ok(resolved.every((row) => row.status === 'CLOSED'));
   assert.ok(resolved.every((row) => row.exitHorizonLagMs >= 300));
   assert.ok(resolved.every((row) => Number.isFinite(row.netReturnPct)));
+});
+
+test('execution simulator independently blocks a same-slot confirmation', () => {
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store });
+  const created = engine.execution.schedule({
+    confirmationId: 'invalid:same-slot',
+    episodeId: 'invalid',
+    profileId: 'PD-R1',
+    confirmedAtMs: Date.now(),
+    slot: 10,
+    snapshot: { slotDelta: 0 },
+    dump: { pool: 'pool', mint: 'mint' },
+  });
+  assert.deepEqual(created, []);
+  assert.equal(engine.execution.health().blockedSameSlot, 1);
+  assert.equal(store.simulations.size, 0);
+});
+
+test('same-slot probe expires inactive dumps without creating strategy state', () => {
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store });
+  engine.sameSlotProbe.startEpisode({
+    episodeId: 'probe-only', pool: 'pool', mint: 'mint', slot: 10,
+    detectedAtMs: 1_000, postPrice: 1, signalTrade: {},
+  });
+  assert.equal(engine.sameSlotProbe.health().activeDumps, 1);
+  engine.sameSlotProbe.advanceTime(6_001);
+  assert.equal(engine.sameSlotProbe.health().activeDumps, 0);
+  assert.equal(store.confirmations.length, 0);
+  assert.equal(store.simulations.size, 0);
 });
 
 test('creator dumps are recorded but never reach confirmation', () => {

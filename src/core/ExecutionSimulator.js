@@ -22,11 +22,16 @@ class ExecutionSimulator {
       noEntry: 0,
       exitFilled: 0,
       noExit: 0,
+      blockedSameSlot: 0,
     };
   }
 
   schedule(confirmation) {
     const created = [];
+    if (!(Number(confirmation?.snapshot?.slotDelta) > 0)) {
+      this.metrics.blockedSameSlot += 1;
+      return created;
+    }
     for (const entry of this.config.entryVariants) {
       for (const positionSol of this.config.positionSizesSol) {
         for (const exit of this.config.exitProfiles) {

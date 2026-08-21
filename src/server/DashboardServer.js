@@ -54,9 +54,20 @@ class DashboardServer {
       }
       const limit = Number(url.searchParams.get('limit') || 100);
       if (url.pathname === '/api/summary') return sendJson(response, 200, this.store.summary());
-      if (url.pathname === '/api/dumps') return sendJson(response, 200, this.store.recentDumps(limit));
+      if (url.pathname === '/api/dumps') {
+        if (url.searchParams.has('page') || url.searchParams.has('pageSize')) {
+          return sendJson(response, 200, this.store.recentDumpsPage(
+            Number(url.searchParams.get('page') || 1),
+            Number(url.searchParams.get('pageSize') || 20),
+          ));
+        }
+        return sendJson(response, 200, this.store.recentDumps(limit));
+      }
       if (url.pathname === '/api/simulations') {
         return sendJson(response, 200, this.store.recentSimulations(limit));
+      }
+      if (url.pathname === '/api/same-slot') {
+        return sendJson(response, 200, this.store.recentSameSlotObservations(limit));
       }
       if (url.pathname === '/api/health') return sendJson(response, 200, this.healthProvider());
       return sendJson(response, 404, { error: 'not found' });

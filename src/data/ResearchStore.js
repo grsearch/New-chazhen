@@ -52,6 +52,23 @@ function returnStats(rows) {
   };
 }
 
+function compareCohortPerformance(left, right) {
+  const metrics = ['winRatePct', 'averageNetReturnPct', 'resolved', 'scheduled'];
+  for (const metric of metrics) {
+    const leftValue = number(left?.[metric]);
+    const rightValue = number(right?.[metric]);
+    if (leftValue == null && rightValue == null) continue;
+    if (leftValue == null) return 1;
+    if (rightValue == null) return -1;
+    if (leftValue !== rightValue) return rightValue - leftValue;
+  }
+  return [left.recoveryProfileId, left.entryVariantId, left.positionSol, left.exitProfileId]
+    .join(':').localeCompare(
+      [right.recoveryProfileId, right.entryVariantId, right.positionSol, right.exitProfileId]
+        .join(':'),
+    );
+}
+
 class ResearchStore {
   constructor(config) {
     this.config = config;
@@ -74,7 +91,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '1')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -216,6 +233,32 @@ class ResearchStore {
         snapshot_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_confirmations_time ON confirmations(confirmed_at_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS same_slot_observations (
+        observation_id TEXT PRIMARY KEY,
+        episode_id TEXT NOT NULL REFERENCES dump_events(episode_id),
+        mint TEXT NOT NULL,
+        pool TEXT NOT NULL,
+        observed_at_ms INTEGER NOT NULL,
+        slot INTEGER NOT NULL,
+        dump_transaction_index INTEGER,
+        buy_transaction_index INTEGER,
+        instruction_index INTEGER,
+        event_index INTEGER NOT NULL,
+        signature TEXT,
+        wallet TEXT,
+        classification TEXT NOT NULL,
+        receive_lag_ms INTEGER NOT NULL,
+        buy_sol REAL NOT NULL,
+        price REAL,
+        price_bounce_pct REAL,
+        executable INTEGER NOT NULL DEFAULT 0 CHECK(executable = 0),
+        rejection_reason TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_same_slot_episode
+        ON same_slot_observations(episode_id, observed_at_ms);
+      CREATE INDEX IF NOT EXISTS idx_same_slot_time
+        ON same_slot_observations(observed_at_ms DESC);
 
       CREATE TABLE IF NOT EXISTS simulations (
         simulation_id TEXT PRIMARY KEY,
@@ -382,6 +425,19 @@ class ResearchStore {
           @currentQuoteSol,@snapshotJson
         )
       `),
+      sameSlotObservation: this.db.prepare(`
+        INSERT OR IGNORE INTO same_slot_observations (
+          observation_id,episode_id,mint,pool,observed_at_ms,slot,
+          dump_transaction_index,buy_transaction_index,instruction_index,event_index,
+          signature,wallet,classification,receive_lag_ms,buy_sol,price,
+          price_bounce_pct,executable,rejection_reason
+        ) VALUES (
+          @observationId,@episodeId,@mint,@pool,@observedAtMs,@slot,
+          @dumpTransactionIndex,@buyTransactionIndex,@instructionIndex,@eventIndex,
+          @signature,@wallet,@classification,@receiveLagMs,@buySol,@price,
+          @priceBouncePct,@executable,@rejectionReason
+        )
+      `),
       simulation: this.db.prepare(`
         INSERT INTO simulations (
           simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
@@ -541,6 +597,21 @@ class ResearchStore {
     });
   }
 
+  insertSameSlotObservation(observation) {
+    this._enqueue(this.statements.sameSlotObservation, {
+      ...observation,
+      executable: 0,
+      dumpTransactionIndex: number(observation.dumpTransactionIndex),
+      buyTransactionIndex: number(observation.buyTransactionIndex),
+      instructionIndex: number(observation.instructionIndex),
+      eventIndex: number(observation.eventIndex) ?? 0,
+      receiveLagMs: Math.max(0, number(observation.receiveLagMs) || 0),
+      buySol: Math.max(0, number(observation.buySol) || 0),
+      price: number(observation.price),
+      priceBouncePct: number(observation.priceBouncePct),
+    });
+  }
+
   insertSimulation(simulation) { this._upsertSimulation(simulation); }
   updateSimulation(simulation) { this._upsertSimulation(simulation); }
 
@@ -618,6 +689,18 @@ class ResearchStore {
         COUNT(*) total_confirmations
       FROM confirmations
     `).get();
+    const sameSlot = this.db.prepare(`
+      SELECT COUNT(*) observations,
+        SUM(CASE WHEN classification='STRICT_AFTER_DUMP' THEN 1 ELSE 0 END) strict_after_dump,
+        SUM(CASE WHEN classification='SLOT_CORRELATED' THEN 1 ELSE 0 END) slot_correlated,
+        COUNT(DISTINCT CASE WHEN classification='STRICT_AFTER_DUMP' THEN episode_id END)
+          events_with_strict_buy,
+        AVG(receive_lag_ms) average_receive_lag_ms,
+        AVG(buy_sol) average_buy_sol,
+        SUM(buy_sol) total_buy_sol,
+        SUM(executable) executable_signals
+      FROM same_slot_observations
+    `).get();
     const simulationCounts = this.db.prepare(`
       SELECT COUNT(*) scheduled,
         SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
@@ -652,6 +735,19 @@ class ResearchStore {
         averageUniqueBuyers: dump.average_unique_buyers,
         averageBuyToDumpPct: dump.average_buy_to_dump_pct,
         averageMaxRecoveryPct: dump.average_max_recovery_pct,
+      },
+      sameSlotProbe: {
+        observations: sameSlot.observations || 0,
+        strictAfterDumpBuys: sameSlot.strict_after_dump || 0,
+        slotCorrelatedBuys: sameSlot.slot_correlated || 0,
+        eventsWithStrictBuy: sameSlot.events_with_strict_buy || 0,
+        eventRatePct: dump.independent
+          ? (sameSlot.events_with_strict_buy || 0) / dump.independent * 100 : null,
+        averageReceiveLagMs: sameSlot.average_receive_lag_ms,
+        averageBuySol: sameSlot.average_buy_sol,
+        totalBuySol: sameSlot.total_buy_sol || 0,
+        executableSignals: sameSlot.executable_signals || 0,
+        executionEnabled: false,
       },
       execution: {
         scheduled: simulationCounts.scheduled,
@@ -703,7 +799,7 @@ class ResearchStore {
         noExitRatePct: group.entry_filled ? group.no_exit / group.entry_filled * 100 : null,
         ...returnStats(rows),
       };
-    });
+    }).sort(compareCohortPerformance);
   }
 
   recentDumps(limit = 100) {
@@ -712,10 +808,35 @@ class ResearchStore {
       .all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
+  recentDumpsPage(page = 1, pageSize = 20) {
+    this.flush();
+    const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
+    const total = this.db.prepare('SELECT COUNT(*) count FROM dump_events').get().count;
+    const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
+    const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
+    const items = this.db.prepare(`
+      SELECT * FROM dump_events ORDER BY detected_at_ms DESC LIMIT ? OFFSET ?
+    `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+    return {
+      items,
+      page: normalizedPage,
+      pageSize: normalizedSize,
+      total,
+      totalPages,
+    };
+  }
+
   recentSimulations(limit = 100) {
     this.flush();
     return this.db.prepare(`SELECT * FROM simulations ORDER BY updated_at_ms DESC LIMIT ?`)
       .all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
+  }
+
+  recentSameSlotObservations(limit = 100) {
+    this.flush();
+    return this.db.prepare(`
+      SELECT * FROM same_slot_observations ORDER BY observed_at_ms DESC LIMIT ?
+    `).all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
   health() {
@@ -733,4 +854,4 @@ class ResearchStore {
   }
 }
 
-module.exports = { ResearchStore, returnStats };
+module.exports = { ResearchStore, compareCohortPerformance, returnStats };

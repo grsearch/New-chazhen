@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Same-Slot Dump Backrun Research</title>
+  <title>Post-Dump Recovery Research</title>
   <style>
     :root { color-scheme: dark; --bg:#0b1014; --panel:#121a20; --line:#26333c; --text:#e7eef2; --muted:#8da0ac; --good:#50d890; --bad:#ff6b6b; --accent:#72b7ff; }
     * { box-sizing:border-box; }
@@ -19,44 +19,125 @@
     .card { padding:14px; }
     .label { color:var(--muted); font-size:12px; }
     .value { font-size:23px; margin-top:5px; font-variant-numeric:tabular-nums; }
-    .panel { padding:16px; margin-bottom:18px; overflow:auto; }
+    .panel { padding:16px; margin-bottom:18px; overflow:hidden; }
+    .table-wrap { overflow:auto; }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .panel-head h2 { margin:0; }
+    .sort-note { color:var(--muted); font-size:12px; }
     table { width:100%; border-collapse:collapse; white-space:nowrap; }
     th,td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums; }
     th:first-child,td:first-child { text-align:left; }
     th { color:var(--muted); font-size:12px; font-weight:500; }
     .good { color:var(--good); } .bad { color:var(--bad); }
     code { color:var(--accent); }
-    @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} }
+    .token-link { color:var(--accent); text-decoration:none; border-bottom:1px dashed #4b7ead; }
+    .token-link:hover { color:#a8d4ff; border-bottom-style:solid; }
+    .rank { color:var(--muted); display:inline-block; min-width:30px; }
+    .pager { min-height:38px; display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-top:12px; color:var(--muted); }
+    .pager button { border:1px solid var(--line); border-radius:8px; padding:6px 10px; color:var(--text); background:#18232b; cursor:pointer; }
+    .pager button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+    .pager button:disabled { opacity:.35; cursor:not-allowed; }
+    .pager-info { min-width:180px; text-align:center; font-variant-numeric:tabular-nums; }
+    .empty { color:var(--muted); text-align:center!important; padding:28px!important; }
+    @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} .panel-head{align-items:start;flex-direction:column}.pager{justify-content:center;flex-wrap:wrap}.pager-info{order:-1;width:100%} }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>Post-Dump Recovery / Toxic Flow Filter</h1><p>只研究恢复确认后的可执行回测；不会签名或发送交易。</p></div>
+    <div><h1>Post-Dump Recovery / Toxic Flow Filter</h1><p>主策略只允许后续 Slot 恢复确认；Same-Slot 仅做不可执行的基础设施观察。</p></div>
     <div class="badge" id="status">读取中</div>
   </header>
   <section class="cards" id="cards"></section>
-  <section class="panel"><h2>延迟 × 仓位 × 退出组合</h2><table id="cohorts"></table></section>
-  <section class="panel"><h2>最近砸盘事件</h2><table id="dumps"></table></section>
+  <section class="panel"><div class="panel-head"><h2>Same-Slot 基础设施观察（不计入策略收益）</h2></div><div class="table-wrap"><table id="same-slot"></table></div></section>
+  <section class="panel">
+    <div class="panel-head"><h2>延迟 × 仓位 × 退出组合</h2><span class="sort-note">默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="table-wrap"><table id="cohorts"></table></div><div class="pager" id="cohort-pager"></div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>最近砸盘事件</h2><span class="sort-note">按检测时间从新到旧</span></div>
+    <div class="table-wrap"><table id="dumps"></table></div><div class="pager" id="dump-pager"></div>
+  </section>
 </main>
 <script>
-const fmt=(v,d=2)=>v==null?'—':Number(v).toFixed(d);
-const pct=v=>v==null?'—':`${fmt(v)}%`;
-const cell=(v,c='')=>`<td class="${c}">${v}</td>`;
+const PAGE_SIZE=20;
+const state={cohortPage:1,dumpPage:1,cohorts:[]};
+let refreshVersion=0;
+const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
+const pct=v=>v==null||!Number.isFinite(Number(v))?'—':`${fmt(v)}%`;
+const cell=(v,c='')=>`<td class="${c}">${html(v==null?'—':v)}</td>`;
+const time=v=>v==null?'—':new Date(v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
+const mintLink=mint=>{
+  const value=String(mint||'');
+  if(!value)return '—';
+  const label=value.length>14?`${value.slice(0,8)}…${value.slice(-4)}`:value;
+  return `<a class="token-link" href="https://gmgn.ai/sol/token/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer" title="${html(value)}">${html(label)} ↗</a>`;
+};
+const metric=v=>Number.isFinite(Number(v))?Number(v):null;
+const compareMetric=(a,b)=>{
+  const left=metric(a),right=metric(b);
+  if(left==null&&right==null)return 0;
+  if(left==null)return 1;
+  if(right==null)return -1;
+  return right-left;
+};
+const compareCohorts=(a,b)=>compareMetric(a.winRatePct,b.winRatePct)
+  ||compareMetric(a.averageNetReturnPct,b.averageNetReturnPct)
+  ||compareMetric(a.resolved,b.resolved)||compareMetric(a.scheduled,b.scheduled);
+const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
+function pager(id,kind,page,totalPages,total){
+  const disabledFirst=page<=1?'disabled':'';
+  const disabledLast=page>=totalPages?'disabled':'';
+  document.querySelector(id).innerHTML=`<button ${disabledFirst} onclick="changePage('${kind}',1)">首页</button><button ${disabledFirst} onclick="changePage('${kind}',${page-1})">上一页</button><span class="pager-info">第 ${page} / ${totalPages} 页 · 共 ${total} 条</span><button ${disabledLast} onclick="changePage('${kind}',${page+1})">下一页</button><button ${disabledLast} onclick="changePage('${kind}',${totalPages})">末页</button>`;
+}
+function renderCohorts(){
+  const rows=[...state.cohorts].sort(compareCohorts);
+  const totalPages=pageCount(rows.length);
+  state.cohortPage=Math.min(Math.max(1,state.cohortPage),totalPages);
+  const start=(state.cohortPage-1)*PAGE_SIZE;
+  const visible=rows.slice(start,start+PAGE_SIZE);
+  const body=visible.length?visible.map((r,index)=>{
+    const ret=r.averageNetReturnPct;
+    const key=`${r.recoveryProfileId}/${r.entryVariantId}/${r.positionSol}/${r.exitProfileId}`;
+    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code></td>${cell(r.scheduled)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="9">暂无策略组合数据</td></tr>';
+  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>样本</th><th>Entry</th><th>Exit</th><th>NO_EXIT</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+body;
+  pager('#cohort-pager','cohort',state.cohortPage,totalPages,rows.length);
+}
+function renderDumps(result){
+  state.dumpPage=result.page;
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无砸盘事件</td></tr>';
+  document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+body;
+  pager('#dump-pager','dump',result.page,result.totalPages,result.total);
+}
+function changePage(kind,page){
+  if(kind==='cohort'){
+    state.cohortPage=page;
+    renderCohorts();
+    return;
+  }
+  state.dumpPage=page;
+  refresh();
+}
 async function refresh(){
+  const version=++refreshVersion;
   try{
-    const [summary,dumps,health]=await Promise.all([
-      fetch('/api/summary').then(r=>r.json()),fetch('/api/dumps?limit=30').then(r=>r.json()),fetch('/api/health').then(r=>r.json())
+    const [summary,dumpPage,sameSlot,health]=await Promise.all([
+      fetch('/api/summary').then(r=>r.json()),fetch(`/api/dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),
+      fetch('/api/same-slot?limit=30').then(r=>r.json()),fetch('/api/health').then(r=>r.json())
     ]);
+    if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'}`;
-    const d=summary.dumps,e=summary.execution;
-    const cards=[['独立砸盘事件',d.independent],['下一 Slot 恢复率',pct(d.nextSlotRecoveryRatePct)],['严格排序覆盖',pct(d.strictOrderingCoveragePct)],['二次砸盘率',pct(d.secondDumpRatePct)],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['扣费 PF',fmt(e.profitFactor)]];
+    const d=summary.dumps,s=summary.sameSlotProbe,e=summary.execution;
+    const cards=[['独立砸盘事件',d.independent],['下一 Slot 恢复率',pct(d.nextSlotRecoveryRatePct)],['Same-Slot观察',s.observations],['Same-Slot可执行',s.executableSignals],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['扣费 PF',fmt(e.profitFactor)]];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
-    document.querySelector('#cohorts').innerHTML='<tr><th>组合</th><th>样本</th><th>Entry</th><th>Exit</th><th>NO_EXIT</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+summary.cohorts.slice(0,200).map(r=>{
-      const ret=r.averageNetReturnPct; return `<tr><td><code>${r.recoveryProfileId}/${r.entryVariantId}/${r.positionSol}/${r.exitProfileId}</code></td>${cell(r.scheduled)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(pct(r.winRatePct))}${cell(pct(ret),ret>0?'good':ret<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
-    }).join('');
-    document.querySelector('#dumps').innerHTML='<tr><th>时间 / Mint</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+dumps.map(r=>`<tr><td>${new Date(r.detected_at_ms).toLocaleTimeString()} · <code>${(r.mint||'').slice(0,8)}…</code></td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join('');
-  }catch(e){document.querySelector('#status').textContent=`读取失败: ${e.message}`}
+    const sameSlotBody=sameSlot.length?sameSlot.map(r=>`<tr><td>${html(time(r.observed_at_ms))} · ${mintLink(r.mint)}</td>${cell(r.classification)}${cell(fmt(r.buy_sol,3))}${cell(`${r.receive_lag_ms}ms`)}${cell(pct(r.price_bounce_pct))}${cell('否','bad')}${cell(r.rejection_reason)}</tr>`).join(''):'<tr><td class="empty" colspan="7">暂无 Same-Slot 观察</td></tr>';
+    document.querySelector('#same-slot').innerHTML='<tr><th>时间 / 合约地址</th><th>分类</th><th>买入 SOL</th><th>接收延迟</th><th>价格反弹</th><th>可执行</th><th>原因</th></tr>'+sameSlotBody;
+    state.cohorts=summary.cohorts||[];
+    renderCohorts();
+    renderDumps(dumpPage);
+  }catch(e){if(version===refreshVersion)document.querySelector('#status').textContent=`读取失败: ${e.message}`}
 }
 refresh(); setInterval(refresh,5000);
 </script>

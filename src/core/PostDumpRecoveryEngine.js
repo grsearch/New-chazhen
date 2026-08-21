@@ -4,6 +4,7 @@ const { DumpDetector } = require('./DumpDetector');
 const { ToxicFlowFilter } = require('./ToxicFlowFilter');
 const { RecoveryConfirmer } = require('./RecoveryConfirmer');
 const { ExecutionSimulator } = require('./ExecutionSimulator');
+const { SameSlotProbe } = require('./SameSlotProbe');
 
 class PostDumpRecoveryEngine {
   constructor({ config, store, now = () => Date.now() }) {
@@ -17,6 +18,7 @@ class PostDumpRecoveryEngine {
       toxicFilter: this.toxicFilter,
       now,
     });
+    this.sameSlotProbe = new SameSlotProbe();
     this.execution = new ExecutionSimulator({ config: config.execution, store, now });
     this.metrics = {
       events: 0,
@@ -24,6 +26,8 @@ class PostDumpRecoveryEngine {
       migrations: 0,
       dumps: 0,
       confirmations: 0,
+      blockedSameSlotConfirmations: 0,
+      sameSlotObservations: 0,
       errors: 0,
       lastEventAtMs: null,
     };
@@ -43,6 +47,11 @@ class PostDumpRecoveryEngine {
 
     const dump = this.dumpDetector.observeTrade(event);
     const recoveryResult = this.recovery.observeTrade(event);
+    const sameSlotObservations = this.sameSlotProbe.observeTrade(event);
+    for (const observation of sameSlotObservations) {
+      this.store.insertSameSlotObservation?.(observation);
+      this.metrics.sameSlotObservations += 1;
+    }
     for (const snapshot of recoveryResult.updates) this.store.updateDump(snapshot);
     for (const outcome of recoveryResult.toxicOutcomes) {
       this.toxicFilter.recordToxicOutcome(
@@ -50,6 +59,10 @@ class PostDumpRecoveryEngine {
       );
     }
     for (const confirmation of recoveryResult.confirmations) {
+      if (!(Number(confirmation.snapshot?.slotDelta) > 0)) {
+        this.metrics.blockedSameSlotConfirmations += 1;
+        continue;
+      }
       this.store.insertConfirmation(confirmation);
       this.execution.schedule(confirmation);
       this.metrics.confirmations += 1;
@@ -59,6 +72,7 @@ class PostDumpRecoveryEngine {
       const toxic = this.toxicFilter.evaluateDump(dump);
       this.store.insertDump(dump, toxic);
       const initial = this.recovery.startEpisode(dump, toxic);
+      this.sameSlotProbe.startEpisode(dump);
       this.store.updateDump(initial);
       this.metrics.dumps += 1;
       dump.toxic = toxic;
@@ -71,6 +85,7 @@ class PostDumpRecoveryEngine {
   advanceTime(now = this.now()) {
     const expired = this.recovery.advanceTime(now);
     for (const snapshot of expired) this.store.updateDump(snapshot);
+    this.sameSlotProbe.advanceTime(now);
     this.execution.advanceTime(now);
     this.store.flush();
   }
@@ -83,6 +98,7 @@ class PostDumpRecoveryEngine {
       dumpDetector: this.dumpDetector.health(),
       toxicFilter: this.toxicFilter.health(),
       recovery: this.recovery.health(),
+      sameSlotProbe: this.sameSlotProbe.health(),
       execution: this.execution.health(),
     };
   }

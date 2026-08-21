@@ -22,7 +22,7 @@ function integer(name, fallback, bounds = {}) {
   return Math.trunc(number(name, fallback, bounds));
 }
 
-const positionSizesSol = [0.02, 0.05, 0.1];
+const positionSizesSol = [1, 2, 5];
 
 const config = {
   pump: {

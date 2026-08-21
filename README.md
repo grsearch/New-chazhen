@@ -1,12 +1,12 @@
-# Same-Slot Dump Backrun v2
+# Post-Dump Recovery / Toxic Flow Filter
 
 这是一个只做研究的 PumpSwap **Post-Dump Recovery / Toxic Flow Filter** 项目。它从
 [Flow-Acceleration](https://github.com/grsearch/Flow-Acceleration) 的 Pump 事件解析、流式去重、
 储备报价和 SQLite 思路重建而来，但已删除旧 Shadow 策略、LiveTradingManager、Primary 信号、
 旧部署配置和历史数据库代码。
 
-项目名字保留 “Same-Slot Dump Backrun”，但策略不再假设机器人能插入已经完成的同一 Slot。
-同 Slot 交易只用于研究标签；真正的模拟入场必须先看到下一 Slot 或后续 Slot 的公开恢复证据。
+项目将两个研究口径硬隔离：主策略只在下一 Slot 或后续 Slot 出现公开恢复证据后模拟入场；
+Same-Slot 只作为基础设施观察组，固定标记为不可执行，不生成确认、仓位或收益。
 
 > 当前代码不会读取私钥，不会签名，也没有发送交易的实现。
 
@@ -17,10 +17,24 @@
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
 4. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
-5. **Recovery Confirmer**：同 Slot 买单仅统计；下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
-6. **Execution Simulator**：分别模拟确认后 100/200/400/800ms 与下一 Slot 入场，仓位为 0.02/0.05/0.1 SOL。
-7. **Research Store**：批量写入 SQLite，`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造止损成交价。
-8. **Minimal Dashboard**：展示事件数、排序覆盖、恢复率、Fill Rate、NO_EXIT、PF、最差 5% 和分组结果。
+5. **Same-Slot Probe**：独立记录同 Slot 后续买单的严格排序、金额和本地接收延迟，永不触发交易模拟。
+6. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
+7. **Execution Simulator**：分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。
+8. **Research Store**：批量写入 SQLite，`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造止损成交价。
+9. **Minimal Dashboard**：分开展示 Same-Slot 观察、后续 Slot 主策略、Fill Rate、NO_EXIT、PF 和分组结果。
+
+## 两条研究线
+
+### 主策略：Post-Dump Recovery
+
+恢复确认必须满足 `slotDelta > 0`。引擎和执行模拟器各自设有一道硬性防护，任何同 Slot 确认都不会进入
+`confirmations` 或 `simulations`。最早路径是“Slot N 砸盘 → Slot N+1 确认 → 确认后延迟报价入场”。
+
+### 观察组：Same-Slot Infrastructure Probe
+
+观察组只回答“砸盘完成后，同 Slot 是否还能看到后续买单，以及本地晚了多少毫秒”。有 transaction index 时记录
+`STRICT_AFTER_DUMP`，缺失时记录 `SLOT_CORRELATED`。两类记录的 `executable` 都永久为 `false`，不计入主策略的
+胜率、PF、Entry Fill 或收益。
 
 ## 初始研究组
 
@@ -81,18 +95,47 @@ pnpm start
 pnpm replay ./events.jsonl
 ```
 
+## 每日 COS 数据上传
+
+服务器使用 systemd Timer 在每天北京时间 **07:00** 导出最近24小时研究数据并上传腾讯 COS。Timer 明确绑定
+`Asia/Shanghai`，不依赖服务器自身时区；`Persistent=true` 会在服务器错过执行时间后补跑一次。
+
+```bash
+sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /opt/new-chazhen
+sudoedit /etc/new-chazhen/backup-cos.env
+sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /opt/new-chazhen
+```
+
+配置模板位于 `deploy/backup-cos.env.example`，真实 Secret ID 和 Secret Key 只能保存在服务器的
+`/etc/new-chazhen/backup-cos.env`，不要写入项目 `.env` 或提交到 Git。安装器只有在 COS 配置完整、
+新 07:00 Timer 通过 systemd 校验并启用后，才会停用旧的 `flow-acceleration-backup.timer`（08:00）。
+已有服务器可以只读复用 `/etc/flow-acceleration/backup-cos.env` 中的旧凭据，无需复制 Secret。
+
+手动检查：
+
+```bash
+sudo systemctl start post-dump-recovery-backup.service
+systemctl list-timers post-dump-recovery-backup.timer --all
+cat /opt/new-chazhen/data/exports/last-run.env
+```
+
+上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256；上传主文件和校验文件后，
+脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
+
 ## 数据表
 
 - `trades`：原始 AMM 事件、完整排序坐标、原始金额、储备、精度和逐笔费用。
 - `slot_summaries`：transaction index 覆盖与 Slot 完整性统计。
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、生存率和二次砸盘。
 - `confirmations`：R1/R2/LQ 的确认时点与全部恢复特征。
+- `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额和接收延迟。
 - `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
 ## 当前边界
 
 - LaserStream 没有提供 `transactionIndex` 时，只能证明同 Slot 相关，不能证明严格执行顺序。
+- 即使存在严格排序的同 Slot 后续买单，也只是已经执行交易的观察结果，不代表机器人可以回到该位置成交。
 - 仅靠事件流无法可靠计算 Top Holder 或钱包关联集群；当前只支持信号前已知的 Creator、配置名单和历史毒性记录。
 - 未使用 RPC 补历史池龄。进程启动前已经存在的池子以“已观察时长下限”表示，因此初期会保守地拒绝池龄门槛。
 - 本项目不包含实盘执行。只有在 100–300 个独立事件、两个不重合时间窗口、全成本 PF ≥ 1.3、
@@ -106,4 +149,4 @@ pnpm test
 ```
 
 测试覆盖有效储备、signed virtual reserve、逐笔费用、Token 精度、严格/相关 Slot 标签、
-Creator 拒绝、多钱包恢复、延迟入场、延迟退出、SQLite 批量写入和 `NO_EXIT` 独立统计。
+Same-Slot 硬隔离、Creator 拒绝、多钱包恢复、延迟入场、延迟退出、SQLite 批量写入和 `NO_EXIT` 独立统计。
