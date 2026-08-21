@@ -93,7 +93,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '2')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '3')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -288,6 +288,7 @@ class ResearchStore {
         entry_market_price REAL,
         entry_impact_pct REAL,
         entry_protocol_fee_bps REAL,
+        entry_total_fee_bps REAL,
         entry_liquidity_usage_pct REAL,
         token_units REAL,
         entry_reserve_source TEXT,
@@ -309,6 +310,7 @@ class ResearchStore {
         exit_market_price REAL,
         exit_impact_pct REAL,
         exit_protocol_fee_bps REAL,
+        exit_total_fee_bps REAL,
         exit_liquidity_usage_pct REAL,
         exit_reserve_source TEXT,
         proceeds_sol REAL,
@@ -336,6 +338,14 @@ class ResearchStore {
         last_episode_id TEXT
       );
     `);
+    this._ensureColumn('simulations', 'entry_total_fee_bps', 'REAL');
+    this._ensureColumn('simulations', 'exit_total_fee_bps', 'REAL');
+  }
+
+  _ensureColumn(table, column, definition) {
+    const exists = this.db.prepare(`PRAGMA table_info(${table})`).all()
+      .some((row) => row.name === column);
+    if (!exists) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   _prepare() {
@@ -447,11 +457,13 @@ class ResearchStore {
           rejection_reason,confirmed_at_ms,confirmation_slot,requested_entry_at_ms,
           entry_deadline_at_ms,entry_at_ms,entry_slot,entry_signature,entry_quote_lag_ms,
           actual_entry_delay_ms,entry_price,entry_market_price,entry_impact_pct,
-          entry_protocol_fee_bps,entry_liquidity_usage_pct,token_units,entry_reserve_source,
+          entry_protocol_fee_bps,entry_total_fee_bps,entry_liquidity_usage_pct,
+          token_units,entry_reserve_source,
           entry_fee_sol,exit_fee_sol,failed_transaction_fee_sol,max_exit_at_ms,
           exit_triggered_at_ms,exit_target_at_ms,requested_exit_at_ms,exit_deadline_at_ms,
           exit_at_ms,exit_slot,exit_signature,exit_quote_lag_ms,exit_horizon_lag_ms,
           exit_reason,exit_price,exit_market_price,exit_impact_pct,exit_protocol_fee_bps,
+          exit_total_fee_bps,
           exit_liquidity_usage_pct,exit_reserve_source,proceeds_sol,total_cost_sol,
           gross_return_pct,net_return_pct,mfe_net_pct,mae_net_pct,last_executable_net_pct,
           last_executable_quote_at_ms,hold_ms,created_at_ms,updated_at_ms
@@ -461,11 +473,12 @@ class ResearchStore {
           @rejectionReason,@confirmedAtMs,@confirmationSlot,@requestedEntryAtMs,
           @entryDeadlineAtMs,@entryAtMs,@entrySlot,@entrySignature,@entryQuoteLagMs,
           @actualEntryDelayMs,@entryPrice,@entryMarketPrice,@entryImpactPct,
-          @entryProtocolFeeBps,@entryLiquidityUsagePct,@tokenUnits,@entryReserveSource,
+          @entryProtocolFeeBps,@entryTotalFeeBps,@entryLiquidityUsagePct,@tokenUnits,@entryReserveSource,
           @entryFeeSol,@exitFeeSol,@failedTransactionFeeSol,@maxExitAtMs,
           @exitTriggeredAtMs,@exitTargetAtMs,@requestedExitAtMs,@exitDeadlineAtMs,
           @exitAtMs,@exitSlot,@exitSignature,@exitQuoteLagMs,@exitHorizonLagMs,
           @exitReason,@exitPrice,@exitMarketPrice,@exitImpactPct,@exitProtocolFeeBps,
+          @exitTotalFeeBps,
           @exitLiquidityUsagePct,@exitReserveSource,@proceedsSol,@totalCostSol,
           @grossReturnPct,@netReturnPct,@mfeNetPct,@maeNetPct,@lastExecutableNetPct,
           @lastExecutableQuoteAtMs,@holdMs,@createdAtMs,@updatedAtMs
@@ -476,6 +489,7 @@ class ResearchStore {
           actual_entry_delay_ms=excluded.actual_entry_delay_ms,entry_price=excluded.entry_price,
           entry_market_price=excluded.entry_market_price,entry_impact_pct=excluded.entry_impact_pct,
           entry_protocol_fee_bps=excluded.entry_protocol_fee_bps,
+          entry_total_fee_bps=excluded.entry_total_fee_bps,
           entry_liquidity_usage_pct=excluded.entry_liquidity_usage_pct,
           token_units=excluded.token_units,entry_reserve_source=excluded.entry_reserve_source,
           max_exit_at_ms=excluded.max_exit_at_ms,exit_triggered_at_ms=excluded.exit_triggered_at_ms,
@@ -486,6 +500,7 @@ class ResearchStore {
           exit_reason=excluded.exit_reason,exit_price=excluded.exit_price,
           exit_market_price=excluded.exit_market_price,exit_impact_pct=excluded.exit_impact_pct,
           exit_protocol_fee_bps=excluded.exit_protocol_fee_bps,
+          exit_total_fee_bps=excluded.exit_total_fee_bps,
           exit_liquidity_usage_pct=excluded.exit_liquidity_usage_pct,
           exit_reserve_source=excluded.exit_reserve_source,proceeds_sol=excluded.proceeds_sol,
           total_cost_sol=excluded.total_cost_sol,gross_return_pct=excluded.gross_return_pct,
@@ -624,11 +639,13 @@ class ResearchStore {
       'entryKind','entryDelayMs','exitProfileId','positionSol','quoteModel','status',
       'rejectionReason','confirmedAtMs','confirmationSlot','requestedEntryAtMs','entryDeadlineAtMs',
       'entryAtMs','entrySlot','entrySignature','entryQuoteLagMs','actualEntryDelayMs','entryPrice',
-      'entryMarketPrice','entryImpactPct','entryProtocolFeeBps','entryLiquidityUsagePct','tokenUnits',
+      'entryMarketPrice','entryImpactPct','entryProtocolFeeBps','entryTotalFeeBps',
+      'entryLiquidityUsagePct','tokenUnits',
       'entryReserveSource','entryFeeSol','exitFeeSol','failedTransactionFeeSol','maxExitAtMs',
       'exitTriggeredAtMs','exitTargetAtMs','requestedExitAtMs','exitDeadlineAtMs','exitAtMs',
       'exitSlot','exitSignature','exitQuoteLagMs','exitHorizonLagMs','exitReason','exitPrice',
-      'exitMarketPrice','exitImpactPct','exitProtocolFeeBps','exitLiquidityUsagePct',
+      'exitMarketPrice','exitImpactPct','exitProtocolFeeBps','exitTotalFeeBps',
+      'exitLiquidityUsagePct',
       'exitReserveSource','proceedsSol','totalCostSol','grossReturnPct','netReturnPct','mfeNetPct',
       'maeNetPct','lastExecutableNetPct','lastExecutableQuoteAtMs','holdMs','createdAtMs','updatedAtMs',
     ];
@@ -663,6 +680,25 @@ class ResearchStore {
       this.pending.unshift(...operations);
       throw error;
     }
+  }
+
+  deleteSimulationsByPositionSizes(positionSizesSol = []) {
+    this.flush();
+    const sizes = [...new Set(positionSizesSol
+      .map((item) => number(item))
+      .filter((item) => Number.isFinite(item) && item > 0))];
+    if (!sizes.length) return 0;
+    const predicates = sizes.map(() => 'ABS(position_sol - ?) < 0.000000001').join(' OR ');
+    return this.db.prepare(`DELETE FROM simulations WHERE ${predicates}`).run(...sizes).changes;
+  }
+
+  deleteSimulationsByQuoteModels(quoteModels = []) {
+    this.flush();
+    const models = [...new Set(quoteModels.map((item) => String(item || '').trim()).filter(Boolean))];
+    if (!models.length) return 0;
+    const placeholders = models.map(() => '?').join(',');
+    return this.db.prepare(`DELETE FROM simulations WHERE quote_model IN (${placeholders})`)
+      .run(...models).changes;
   }
 
   summary() {

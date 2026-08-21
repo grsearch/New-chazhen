@@ -190,11 +190,12 @@ function extractProgramData(logMessages) {
 }
 
 function feeFields(values) {
+  // buybackFeeBasisPoints is reported by the event for fee allocation, but the
+  // official PumpSwap quote SDK does not add it to the user-paid swap fee.
   const totalFeeBps = [
     values.lpFeeBasisPoints,
     values.protocolFeeBasisPoints,
     values.coinCreatorFeeBasisPoints,
-    values.buybackFeeBasisPoints,
   ].reduce((sum, value) => sum + (numeric(value) || 0), 0);
   return { ...values, totalFeeBps };
 }
@@ -454,7 +455,7 @@ class PumpEventParser {
           receivedAtMs,
           timestampMs: receivedAtMs,
           programId: row.programId,
-          parseVersion: 'PUMP_PUBLIC_IDL_2026_08',
+          parseVersion: 'PUMP_PUBLIC_IDL_2026_08_FEE_SEMANTICS_V2',
           orderingConfidence: transactionIndex == null ? 'SLOT_CORRELATED' : 'STRICT',
         });
       } catch (_) {

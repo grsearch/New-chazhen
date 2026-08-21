@@ -67,13 +67,14 @@ test('latest PumpSwap event preserves raw fees, decimals, and strict order coord
   assert.equal(event.instructionIndex, 0);
   assert.equal(event.eventIndex, 0);
   assert.equal(event.orderingConfidence, 'STRICT');
+  assert.equal(event.parseVersion, 'PUMP_PUBLIC_IDL_2026_08_FEE_SEMANTICS_V2');
   assert.equal(event.tokenDecimals, 8);
   assert.equal(event.tokenDecimalsSource, 'TOKEN_BALANCE');
   assert.equal(event.solAmount, 0.992475);
   assert.equal(event.coinCreator, bs58.encode(key(7)));
   assert.equal(event.coinCreatorFeeBasisPoints, 50);
   assert.equal(event.buybackFeeBasisPoints, 10);
-  assert.equal(event.totalFeeBps, 85);
+  assert.equal(event.totalFeeBps, 75);
   assert.equal(event.effectiveQuoteReservesRaw, '99000000000');
   assert.equal(event.baseSupplyRaw, '1000000000000');
 });

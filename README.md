@@ -20,6 +20,8 @@ Same-Slot 只作为基础设施观察组，固定标记为不可执行，不生�
 5. **Same-Slot Probe**：独立记录同 Slot 后续买单的严格排序、金额和本地接收延迟，永不触发交易模拟。
 6. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
 7. **Execution Simulator**：分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。
+
+程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除。
 8. **Research Store**：批量写入 SQLite，`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造止损成交价。
 9. **Minimal Dashboard**：分开展示 Same-Slot 观察、后续 Slot 主策略、Fill Rate、NO_EXIT、PF 和分组结果。
 
@@ -62,14 +64,18 @@ Dump 分层：
 
 实现依据 Pump 官方资料：PumpSwap 是常数乘积 AMM；Quote 侧的有效储备为
 `pool_quote_token_account.amount + virtual_quote_reserves`，其中 virtual 值是 signed `i128`。
-解析器保留事件中的 LP、Protocol、Coin Creator、Cashback、Buyback 费率和原始数值。
+解析器保留事件中的 LP、Protocol、Coin Creator、Cashback、Buyback 费率和原始数值。按官方 SDK，
+可执行交易费只包含 LP、Protocol 与 Coin Creator；`buyback_fee_basis_points` 是费用分配比例，不能再作为
+一笔额外交易费叠加。
 
 - [PumpSwap 官方说明](https://github.com/pump-fun/pump-public-docs/blob/main/docs/PUMP_SWAP_README.md)
 - [PumpSwap 官方 IDL](https://github.com/pump-fun/pump-public-docs/blob/main/idl/pump_amm.json)
 - [动态费用官方说明](https://github.com/pump-fun/pump-public-docs/blob/main/docs/FEE_PROGRAM_README.md)
 
-模拟器版本为 `PUMPSWAP_CPMM_EVENT_FEES_V1`：使用每笔事件的有效储备和费率，再叠加配置的买卖滑点、
+模拟器版本为 `PUMPSWAP_CPMM_EXECUTABLE_FEES_V2`：使用每笔事件的有效储备和可执行费率，再叠加配置的买卖滑点、
 Priority Fee、Jito Tip 与基础交易费。它是事件流可实现性研究模型，不是链上 SDK 的逐指令报价替代品。
+V1 曾把 5000 bps 的 Buyback 分配比例误当成 50% 额外交易费，因此程序启动时会删除全部 V1 派生模拟，
+但保留原始交易、砸盘事件和恢复确认数据。
 
 卖前价格优先使用 5 秒内最后一笔公开储备价格；缺失时才用 SellEvent 的卖后储备重建，并把来源写入数据库。
 Token 精度优先来自交易 Token Balance；缺失时使用 Pump 默认 6 位并标记 `PUMP_DEFAULT`。
@@ -152,6 +158,8 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 - 即使存在严格排序的同 Slot 后续买单，也只是已经执行交易的观察结果，不代表机器人可以回到该位置成交。
 - 仅靠事件流无法可靠计算 Top Holder 或钱包关联集群；当前只支持信号前已知的 Creator、配置名单和历史毒性记录。
 - 未使用 RPC 补历史池龄。进程启动前已经存在的池子以“已观察时长下限”表示，因此初期会保守地拒绝池龄门槛。
+- 当前退出报价使用退出时观察到的公开池状态，没有把 Shadow 买入后的反事实储备逐笔重放；审计显示现有样本偏差约 0.01%–0.5%，
+  对 5 SOL 影响更明显。该限制与已修复的 5000 bps 费用语义错误分开记录，实盘化前必须完成状态化回放。
 - 本项目不包含实盘执行。只有在 100–300 个独立事件、两个不重合时间窗口、全成本 PF ≥ 1.3、
   200–500ms 延迟仍为正、最差 5% 可控且 Exit Fill Rate 可接受后，才应讨论下一阶段。
 

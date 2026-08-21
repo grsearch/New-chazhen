@@ -138,7 +138,7 @@ const config = {
     exitDelayMs: 200,
     exitTimeoutMs: 2_000,
     exitGraceMs: 2_000,
-    quoteModel: 'PUMPSWAP_CPMM_EVENT_FEES_V1',
+    quoteModel: 'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
     buySlippageBps: number('SDBR_BUY_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     sellSlippageBps: number('SDBR_SELL_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     baseTxFeeSol: number('SDBR_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),

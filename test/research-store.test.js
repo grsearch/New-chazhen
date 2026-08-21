@@ -149,3 +149,77 @@ test('recent same-slot observations use bounded server-side pagination', () => {
   assert.equal(bounded.page, 1);
   store.close();
 });
+
+test('obsolete small-position simulations can be removed without deleting current positions', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('episode','mint','pool',1,'STRICT','[]','CONFIRMED',0,1)
+  `).run();
+  store.db.prepare(`
+    INSERT INTO confirmations(
+      confirmation_id,episode_id,profile_id,confirmed_at_ms,ordering_confidence,snapshot_json
+    ) VALUES('confirmation','episode','R1',1,'STRICT','{}')
+  `).run();
+  const insert = store.db.prepare(`
+    INSERT INTO simulations(
+      simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
+      entry_kind,entry_delay_ms,exit_profile_id,position_sol,quote_model,status,
+      confirmed_at_ms,created_at_ms,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+  for (const positionSol of [0.02, 0.05, 0.1, 1, 2, 5]) {
+    insert.run(
+      `simulation-${positionSol}`, 'confirmation', 'episode', 'R1', 'E100',
+      'DELAY', 100, 'H1', positionSol, 'TEST', 'NO_ENTRY', 1, 1, 1,
+    );
+  }
+
+  const removed = store.deleteSimulationsByPositionSizes([0.02, 0.05, 0.1]);
+  const remaining = store.db.prepare('SELECT position_sol FROM simulations ORDER BY position_sol')
+    .all().map((row) => row.position_sol);
+
+  assert.equal(removed, 3);
+  assert.deepEqual(remaining, [1, 2, 5]);
+  assert.deepEqual(store.summary().cohorts.map((row) => row.positionSol), [1, 2, 5]);
+  store.close();
+});
+
+test('invalid V1 fee-model simulations can be removed without deleting V2 research data', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('episode','mint','pool',1,'STRICT','[]','CONFIRMED',0,1)
+  `).run();
+  store.db.prepare(`
+    INSERT INTO confirmations(
+      confirmation_id,episode_id,profile_id,confirmed_at_ms,ordering_confidence,snapshot_json
+    ) VALUES('confirmation','episode','R1',1,'STRICT','{}')
+  `).run();
+  const insert = store.db.prepare(`
+    INSERT INTO simulations(
+      simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
+      entry_kind,entry_delay_ms,exit_profile_id,position_sol,quote_model,status,
+      confirmed_at_ms,created_at_ms,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+  insert.run(
+    'v1', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
+    'PUMPSWAP_CPMM_EVENT_FEES_V1', 'NO_ENTRY', 1, 1, 1,
+  );
+  insert.run(
+    'v2', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
+    'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2', 'NO_ENTRY', 1, 1, 1,
+  );
+
+  const removed = store.deleteSimulationsByQuoteModels(['PUMPSWAP_CPMM_EVENT_FEES_V1']);
+  const remaining = store.db.prepare('SELECT simulation_id FROM simulations').all();
+
+  assert.equal(removed, 1);
+  assert.deepEqual(remaining, [{ simulation_id: 'v2' }]);
+  store.close();
+});
