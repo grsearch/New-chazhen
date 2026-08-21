@@ -7,6 +7,7 @@ const { SlotAssembler } = require('./core/SlotAssembler');
 const { PostDumpRecoveryEngine } = require('./core/PostDumpRecoveryEngine');
 const { ResearchStore } = require('./data/ResearchStore');
 const { DashboardServer } = require('./server/DashboardServer');
+const { RuntimeHealthMonitor } = require('./core/RuntimeHealthMonitor');
 
 async function main() {
   validateConfig({ requireStream: true });
@@ -21,6 +22,7 @@ async function main() {
   const engine = new PostDumpRecoveryEngine({ config, store });
   const stream = new PumpFlowStream({ config });
   let streamState = { state: 'STARTING' };
+  let runtimeHealth = null;
   slots.on('slotFinalized', (summary) => store.recordSlotSummary(summary));
   stream.on('state', (state) => { streamState = state; });
   stream.on('streamError', ({ error, phase, retryInMs }) => {
@@ -37,15 +39,25 @@ async function main() {
     }
   });
 
+  const componentHealth = () => ({
+    generatedAtMs: Date.now(),
+    stream: {
+      ...stream.health(),
+      state: streamState.state,
+      reason: streamState.reason || null,
+      phase: streamState.phase || null,
+      retryInMs: streamState.retryInMs || null,
+    },
+    slotAssembler: slots.health(),
+    engine: engine.health(),
+    store: store.health(),
+  });
   const dashboard = new DashboardServer({
     config: config.dashboard,
     store,
     health: () => ({
-      generatedAtMs: Date.now(),
-      stream: streamState,
-      slotAssembler: slots.health(),
-      engine: engine.health(),
-      store: store.health(),
+      ...componentHealth(),
+      runtime: runtimeHealth?.health() || { enabled: true, status: 'STARTING' },
     }),
   });
   const timer = setInterval(() => {
@@ -57,6 +69,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     clearInterval(timer);
+    runtimeHealth?.stop();
     console.log(`Stopping on ${signal}...`);
     await stream.stop();
     engine.advanceTime();
@@ -70,6 +83,20 @@ async function main() {
   console.log(`Dashboard: http://${config.dashboard.host}:${config.dashboard.port}`);
   console.log('Mode: research only; transaction sending is not implemented.');
   await stream.start();
+  runtimeHealth = new RuntimeHealthMonitor({
+    config: config.health,
+    healthProvider: componentHealth,
+    onFatal: async (snapshot) => {
+      console.error(`[Health] FATAL: ${snapshot.issues.join(', ')}`);
+      if (!config.health.exitOnFatal || stopping) return;
+      try {
+        await stop('HEALTH_FATAL');
+      } finally {
+        process.exit(1);
+      }
+    },
+  });
+  runtimeHealth.start();
 }
 
 main().catch((error) => {

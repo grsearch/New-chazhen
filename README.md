@@ -101,9 +101,9 @@ pnpm replay ./events.jsonl
 `Asia/Shanghai`，不依赖服务器自身时区；`Persistent=true` 会在服务器错过执行时间后补跑一次。
 
 ```bash
-sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /opt/new-chazhen
+sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /home/ubuntu/New-chazhen
 sudoedit /etc/new-chazhen/backup-cos.env
-sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /opt/new-chazhen
+sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /home/ubuntu/New-chazhen
 ```
 
 配置模板位于 `deploy/backup-cos.env.example`，真实 Secret ID 和 Secret Key 只能保存在服务器的
@@ -116,11 +116,25 @@ sudo SERVICE_USER=ubuntu bash deploy/install-daily-export.sh /opt/new-chazhen
 ```bash
 sudo systemctl start post-dump-recovery-backup.service
 systemctl list-timers post-dump-recovery-backup.timer --all
-cat /opt/new-chazhen/data/exports/last-run.env
+cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
 上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256；上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
+
+## 程序内置健康检查
+
+健康检查完全在本机进程内运行，不调用 OpenClaw、LLM 或任何按 Token 计费的服务：
+
+- LaserStream 每2秒检查一次数据新鲜度，默认15秒无消息便自动断开并轮换端点重连。
+- 总健康监控每60秒检查 Stream 状态、最近事件时间、SQLite 待写队列和新增写入错误。
+- 正常时每10分钟只向 systemd Journal 写一条简短日志。
+- 连续5次异常（默认约5分钟）才退出进程；服务器现有的 `Restart=always` 会自动拉起。
+- `/api/health` 的 `runtime.status` 会显示 `STARTING`、`HEALTHY` 或 `DEGRADED`。
+
+因此不应再配置 OpenClaw 每10分钟轮询。可选环境变量包括
+`SDBR_HEALTH_CHECK_MS`、`SDBR_HEALTH_MAX_EVENT_STALE_MS`、`SDBR_HEALTH_MAX_PENDING_WRITES`、
+`SDBR_HEALTH_FATAL_CHECKS` 和 `SDBR_HEALTH_EXIT_ON_FATAL`。
 
 ## 数据表
 

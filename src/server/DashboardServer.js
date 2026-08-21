@@ -67,6 +67,12 @@ class DashboardServer {
         return sendJson(response, 200, this.store.recentSimulations(limit));
       }
       if (url.pathname === '/api/same-slot') {
+        if (url.searchParams.has('page') || url.searchParams.has('pageSize')) {
+          return sendJson(response, 200, this.store.recentSameSlotObservationsPage(
+            Number(url.searchParams.get('page') || 1),
+            Number(url.searchParams.get('pageSize') || 20),
+          ));
+        }
         return sendJson(response, 200, this.store.recentSameSlotObservations(limit));
       }
       if (url.pathname === '/api/health') return sendJson(response, 200, this.healthProvider());
