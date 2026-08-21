@@ -1,5 +1,5 @@
 {
-  "name": "same-slot-dump-backrun-research",
+  "name": "post-dump-recovery-research",
   "version": "2.0.0",
   "private": true,
   "description": "Research-only Post-Dump Recovery and Toxic Flow Filter for PumpSwap.",
@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "replay": "node scripts/replay-jsonl.js",
+    "export:window": "node scripts/export-research-window.js",
     "test": "node --test --test-isolation=none",
     "check": "node scripts/check.js"
   },

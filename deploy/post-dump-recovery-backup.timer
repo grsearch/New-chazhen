@@ -1,0 +1,12 @@
+[Unit]
+Description=Upload Post-Dump Recovery research data daily at 07:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+RandomizedDelaySec=0
+Unit=post-dump-recovery-backup.service
+
+[Install]
+WantedBy=timers.target

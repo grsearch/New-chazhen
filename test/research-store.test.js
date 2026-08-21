@@ -37,10 +37,18 @@ test('research store batches events and reports NO_EXIT independently', () => {
     confirmedAtMs: now + 100, slot: 101, transactionIndex: 1, instructionIndex: 0,
     eventIndex: 0, signature: 'confirm', orderingConfidence: 'STRICT', snapshot,
   });
+  store.insertSameSlotObservation({
+    observationId: 'episode:same-slot:0', episodeId: 'episode', mint: 'mint', pool: 'pool',
+    observedAtMs: now + 50, slot: 100, dumpTransactionIndex: 1, buyTransactionIndex: 2,
+    instructionIndex: 0, eventIndex: 0, signature: 'same-slot', wallet: 'buyer',
+    classification: 'STRICT_AFTER_DUMP', receiveLagMs: 50, buySol: 0.5,
+    price: 7.5, priceBouncePct: 7.14, executable: true,
+    rejectionReason: 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
+  });
   const baseSimulation = {
     confirmationId: 'episode:R1', episodeId: 'episode', recoveryProfileId: 'R1',
     entryVariantId: 'E200', entryKind: 'DELAY', entryDelayMs: 200,
-    exitProfileId: 'H1', positionSol: 0.1, quoteModel: 'TEST',
+    exitProfileId: 'H1', positionSol: 1, quoteModel: 'TEST',
     confirmedAtMs: now + 100, confirmationSlot: 101, requestedEntryAtMs: now + 300,
     entryDeadlineAtMs: now + 2_100, entryFeeSol: 0, exitFeeSol: 0,
     failedTransactionFeeSol: 0, createdAtMs: now, updatedAtMs: now + 500,
@@ -57,9 +65,40 @@ test('research store batches events and reports NO_EXIT independently', () => {
   const summary = store.summary();
   assert.equal(summary.dumps.independent, 1);
   assert.equal(summary.dumps.nextSlotRecoveryRatePct, 100);
+  assert.equal(summary.sameSlotProbe.observations, 1);
+  assert.equal(summary.sameSlotProbe.strictAfterDumpBuys, 1);
+  assert.equal(summary.sameSlotProbe.executableSignals, 0, 'store must force probe rows to non-executable');
   assert.equal(summary.execution.scheduled, 2);
   assert.equal(summary.execution.exitFilled, 1);
   assert.equal(summary.execution.noExit, 1);
   assert.equal(summary.execution.resolved, 1, 'NO_EXIT must not be converted into an invented return');
+  store.close();
+});
+
+test('recent dumps use bounded server-side pagination', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  const insert = store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES(?,?,?,?,?,'[]','OBSERVING',0,?)
+  `);
+  for (let index = 0; index < 25; index += 1) {
+    insert.run(
+      `episode-${index}`, `mint-${index}`, `pool-${index}`,
+      1_000 + index, 'STRICT', 1_000 + index,
+    );
+  }
+  const first = store.recentDumpsPage(1, 10);
+  const last = store.recentDumpsPage(3, 10);
+  assert.equal(first.total, 25);
+  assert.equal(first.totalPages, 3);
+  assert.equal(first.items.length, 10);
+  assert.equal(first.items[0].episode_id, 'episode-24');
+  assert.equal(last.items.length, 5);
+  assert.equal(last.items.at(-1).episode_id, 'episode-0');
+  const bounded = store.recentDumpsPage(99, 1_000);
+  assert.equal(bounded.pageSize, 100);
+  assert.equal(bounded.page, 1);
   store.close();
 });

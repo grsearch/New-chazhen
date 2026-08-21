@@ -1,0 +1,31 @@
+[Unit]
+Description=Post-Dump Recovery daily 24-hour research export to Tencent COS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@SERVICE_USER@
+Group=@SERVICE_GROUP@
+WorkingDirectory=@INSTALL_DIR@
+EnvironmentFile=@INSTALL_DIR@/.env
+@BACKUP_ENV_LINE@
+Environment=SDBR_BACKUP_PROJECT_DIR=@INSTALL_DIR@
+Environment=SDBR_BACKUP_NODE_BIN=@NODE_BIN@
+Environment=SDBR_BACKUP_COSCLI_BIN=@COSCLI_BIN@
+Environment=HOME=@INSTALL_DIR@/data/exports/.coscli-home
+ExecStart=/usr/bin/env bash @INSTALL_DIR@/scripts/export-last24h-cos.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=@INSTALL_DIR@
+ReadWritePaths=@INSTALL_DIR@/data
+TimeoutStartSec=2h
+
+[Install]
+WantedBy=multi-user.target
