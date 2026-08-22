@@ -3,6 +3,9 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { PUMP_PARSE_VERSION } = require('../src/core/PumpEventParser');
+
+const MAX_DUMP_DROP_PCT = Number(process.env.SDBR_MAX_DUMP_DROP_PCT || 40);
 
 const EXPLICIT_FILTERS = Object.freeze({
   trades: {
@@ -14,8 +17,9 @@ const EXPLICIT_FILTERS = Object.freeze({
     bind: (startMs, endMs) => [startMs, endMs],
   },
   dump_events: {
-    where: 'detected_at_ms >= ? AND detected_at_ms < ?',
-    bind: (startMs, endMs) => [startMs, endMs],
+    where: `detected_at_ms >= ? AND detected_at_ms < ?
+      AND (drop_pct IS NULL OR drop_pct <= ?) AND parse_version = ?`,
+    bind: (startMs, endMs) => [startMs, endMs, MAX_DUMP_DROP_PCT, PUMP_PARSE_VERSION],
   },
   confirmations: {
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',

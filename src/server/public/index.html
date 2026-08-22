@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Post-Dump Recovery Research</title>
+  <title>Same-Slot Dump Backrun Research</title>
   <style>
     :root { color-scheme: dark; --bg:#0b1014; --panel:#121a20; --line:#26333c; --text:#e7eef2; --muted:#8da0ac; --good:#50d890; --bad:#ff6b6b; --accent:#72b7ff; }
     * { box-sizing:border-box; }
@@ -49,17 +49,17 @@
 <body>
 <main>
   <header>
-    <div><h1>Post-Dump Recovery / Toxic Flow Filter</h1><p>主策略只允许后续 Slot 恢复确认；Same-Slot 仅做不可执行的基础设施观察。</p></div>
+    <div><h1>Same-Slot Dump Backrun / Speed Research</h1><p>首要目标：砸盘后争取同Slot第1/第2笔买入；Post-Dump Recovery仅作为后续Slot对照组。</p></div>
     <div class="badge" id="status">读取中</div>
   </header>
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
   <section class="panel">
-    <div class="panel-head"><h2>Same-Slot 基础设施观察（不计入策略收益）</h2><span class="sort-note">按观察时间从新到旧</span></div>
+    <div class="panel-head"><h2>核心：Same-Slot 速度与链上排名（当前仅观察）</h2><span class="sort-note">按观察时间从新到旧</span></div>
     <div class="table-wrap"><table id="same-slot"></table></div><div class="pager" id="same-slot-pager"></div>
   </section>
   <section class="panel">
-    <div class="panel-head"><h2>延迟 × 仓位 × 退出组合</h2><span class="sort-note">默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="panel-head"><h2>对照组：后续Slot恢复策略</h2><span class="sort-note">默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
     <div class="table-wrap"><table id="cohorts"></table></div><div class="pager" id="cohort-pager"></div>
   </section>
   <section class="panel">
@@ -74,6 +74,7 @@ let refreshVersion=0;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
 const pct=v=>v==null||!Number.isFinite(Number(v))?'—':`${fmt(v)}%`;
+const pricePct=v=>v==null||!Number.isFinite(Number(v))?'—':Math.abs(Number(v))>500?'数据异常/旧解析':pct(v);
 const cell=(v,c='')=>`<td class="${c}">${html(v==null?'—':v)}</td>`;
 const time=v=>v==null?'—':new Date(v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
 const mintLink=mint=>{
@@ -133,14 +134,14 @@ function renderCohorts(){
 }
 function renderDumps(result){
   state.dumpPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无砸盘事件</td></tr>';
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pricePct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无砸盘事件</td></tr>';
   document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+body;
   pager('#dump-pager','dump',result.page,result.totalPages,result.total);
 }
 function renderSameSlot(result){
   state.sameSlotPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.observed_at_ms))} · ${mintLink(r.mint)}</td>${cell(r.classification)}${cell(fmt(r.buy_sol,3))}${cell(`${r.receive_lag_ms}ms`)}${cell(pct(r.price_bounce_pct))}${cell('否','bad')}${cell(r.rejection_reason)}</tr>`).join(''):'<tr><td class="empty" colspan="7">暂无 Same-Slot 观察</td></tr>';
-  document.querySelector('#same-slot').innerHTML='<tr><th>时间 / 合约地址</th><th>分类</th><th>买入 SOL</th><th>接收延迟</th><th>价格反弹</th><th>可执行</th><th>原因</th></tr>'+body;
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.observed_at_ms))} · ${mintLink(r.mint)}</td>${cell(r.classification)}${cell(r.post_dump_buy_rank?`#${r.post_dump_buy_rank}`:'—')}${cell(`${r.dump_transaction_index??'?'}→${r.buy_transaction_index??'?'}`)}${cell(fmt(r.buy_sol,3))}${cell(`${r.receive_lag_ms}ms`)}${cell(pricePct(r.price_bounce_pct))}${cell('否','bad')}${cell(r.rejection_reason)}</tr>`).join(''):'<tr><td class="empty" colspan="9">暂无 Same-Slot 观察</td></tr>';
+  document.querySelector('#same-slot').innerHTML='<tr><th>时间 / 合约地址</th><th>分类</th><th>观测排名</th><th>链上Tx位置</th><th>买入 SOL</th><th>接收延迟</th><th>价格反弹</th><th>本系统可执行</th><th>原因</th></tr>'+body;
   pager('#same-slot-pager','sameSlot',result.page,result.totalPages,result.total);
 }
 function changePage(kind,page){
@@ -167,9 +168,12 @@ async function refresh(){
     if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
     const d=summary.dumps,s=summary.sameSlotProbe,e=summary.execution;
-    const cards=[['独立砸盘事件',d.independent],['恢复事件',d.recoveredEpisodes],['独立已退出事件',e.resolvedEpisodes],['盈利事件（任一组合）',e.episodesWithAnyWin],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['确认模拟覆盖',pct(e.confirmationCoveragePct)],['扣费 PF',fmt(e.profitFactor)],['最大赢家事件贡献',pct(e.largestWinnerEventContributionPct)]];
+    const cards=[['同Slot第1买入样本',s.rank1Buys],['同Slot第2买入样本',s.rank2Buys],['有严格同Slot买入的事件',s.eventsWithStrictBuy],['平均观察延迟',s.averageReceiveLagMs==null?'—':`${fmt(s.averageReceiveLagMs,0)}ms`],['独立砸盘事件',d.independent],['后续Slot恢复事件',d.recoveredEpisodes],['对照组独立已退出',e.resolvedEpisodes],['对照组扣费 PF',fmt(e.profitFactor)],['最大赢家事件贡献',pct(e.largestWinnerEventContributionPct)]];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
     const notices=[];
+    notices.push('<strong>速度口径：</strong>排名#1/#2是已经上链的竞争者买单；LaserStream收到时交易已经执行，不能当成本系统可获得的成交排名');
+    if(metric(d.excludedLegacyPriceEvents)>0)notices.push(`<strong>${d.excludedLegacyPriceEvents}</strong> 个旧价格解析事件已隔离，不参与任何策略统计`);
+    if(metric(d.excludedOverMaxDropEvents)>0)notices.push(`<strong>${d.excludedOverMaxDropEvents}</strong> 个跌幅超过40%的RUG候选已排除`);
     if(metric(e.resolvedEpisodes)<100)notices.push(`<span class="warning">独立已退出事件仅 ${e.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
     if(metric(e.largestWinnerEventContributionPct)>50)notices.push(`最大赢家事件贡献全部正收益的 <strong>${pct(e.largestWinnerEventContributionPct)}</strong>`);
     if(metric(e.confirmationsWithoutSimulation)>0)notices.push(`<strong>${e.confirmationsWithoutSimulation}</strong> 个历史确认没有有效模拟记录`);

@@ -28,7 +28,7 @@ function configuration() {
   return {
     dump: {
       preWindowMs: 5_000, priceFreshMs: 5_000, episodeCooldownMs: 0,
-      stateRetentionMs: 60_000,
+      stateRetentionMs: 60_000, maxDropPct: 40,
       profiles: [{ id: 'TEST-DUMP', minSellToQuotePct: 5, minDropPct: 15, minPostQuoteSol: 20, minPoolAgeMs: 0 }],
     },
     toxic: {
@@ -142,6 +142,45 @@ test('execution simulator independently blocks a same-slot confirmation', () => 
   assert.deepEqual(created, []);
   assert.equal(engine.execution.health().blockedSameSlot, 1);
   assert.equal(store.simulations.size, 0);
+});
+
+test('drops above 40 percent are treated as RUG and never start an episode', () => {
+  const base = 1_800_040_000_000;
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store, now: () => base });
+  engine.observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 21,
+  }));
+  const result = engine.observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 60,
+    price: 4e-8, wallet: 'rug', quoteSol: 40, sequence: 22,
+  }));
+  assert.equal(result.dump, null);
+  assert.equal(store.dumps.length, 0);
+  assert.equal(engine.dumpDetector.health().overMaxDropIgnored, 1);
+});
+
+test('same-slot trades with a different mint precision cannot create fake rebounds', () => {
+  const base = 1_800_045_000_000;
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store, now: () => base });
+  engine.observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 23,
+  }));
+  engine.observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 20,
+    price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 24,
+  }));
+  const wrongDecimals = trade({
+    at: base + 50, slot: 2, tx: 2, side: 'BUY', sol: 1,
+    price: 7.5e-8, wallet: 'wrong-decimals', quoteSol: 75, sequence: 25,
+  });
+  wrongDecimals.tokenDecimals = 9;
+  engine.observe(wrongDecimals);
+  assert.equal(store.sameSlotObservations.length, 0);
+  assert.equal(store.confirmations.length, 0);
 });
 
 test('a second dump before delayed entry invalidates every pending shadow position', () => {

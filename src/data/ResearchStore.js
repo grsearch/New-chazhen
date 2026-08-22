@@ -108,6 +108,8 @@ class ResearchStore {
       slotSummaryRetentionMs: 30 * 86_400_000,
       maintenanceIntervalMs: 600_000,
       maintenanceBatchMax: 10_000,
+      maxDumpDropPct: 40,
+      acceptedDumpParseVersion: null,
       ...config,
     };
     if (this.config.dbPath !== ':memory:') {
@@ -147,7 +149,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '5')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '6')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -240,6 +242,7 @@ class ResearchStore {
         pre_unique_buyers INTEGER,
         pre_largest_buyer_share_pct REAL,
         pre_price_runup_pct REAL,
+        parse_version TEXT,
         valid_buy_sol REAL DEFAULT 0,
         raw_buy_sol REAL DEFAULT 0,
         follow_sell_sol REAL DEFAULT 0,
@@ -315,6 +318,10 @@ class ResearchStore {
         ON same_slot_observations(episode_id, observed_at_ms);
       CREATE INDEX IF NOT EXISTS idx_same_slot_time
         ON same_slot_observations(observed_at_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_same_slot_chain_order
+        ON same_slot_observations(
+          episode_id,classification,buy_transaction_index,instruction_index,event_index
+        );
 
       CREATE TABLE IF NOT EXISTS simulations (
         simulation_id TEXT PRIMARY KEY,
@@ -403,6 +410,17 @@ class ResearchStore {
     this._ensureColumn('simulations', 'exit_total_fee_bps', 'REAL');
     this._ensureColumn('simulations', 'entry_capacity_round_trip_loss_pct', 'REAL');
     this._ensureColumn('simulations', 'entry_capacity_exit_liquidity_usage_pct', 'REAL');
+    this._ensureColumn('dump_events', 'parse_version', 'TEXT');
+    this.db.exec(`
+      UPDATE dump_events
+      SET parse_version=(
+        SELECT t.parse_version FROM trades t
+        WHERE t.signature=dump_events.signature
+          AND t.event_index=dump_events.event_index
+        LIMIT 1
+      )
+      WHERE parse_version IS NULL
+    `);
   }
 
   _ensureColumn(table, column, definition) {
@@ -455,7 +473,7 @@ class ResearchStore {
           low_price,drop_pct,pre_quote_sol,post_quote_sol,sell_to_quote_pct,
           sell_token_to_reserve_pct,pool_age_ms,pool_age_source,pre_trades,pre_buy_sol,
           pre_sell_sol,pre_net_flow_sol,pre_buy_share_pct,pre_unique_buyers,
-          pre_largest_buyer_share_pct,pre_price_runup_pct,updated_at_ms
+          pre_largest_buyer_share_pct,pre_price_runup_pct,parse_version,updated_at_ms
         ) VALUES (
           @episodeId,@mint,@pool,@seller,@coinCreator,@detectedAtMs,@chainTimestampMs,@slot,
           @transactionIndex,@instructionIndex,@eventIndex,@signature,@orderingConfidence,
@@ -464,7 +482,7 @@ class ResearchStore {
           @lowPrice,@dropPct,@preQuoteSol,@postQuoteSol,@sellToQuotePct,
           @sellTokenToReservePct,@poolAgeMs,@poolAgeSource,@preTrades,@preBuySol,
           @preSellSol,@preNetFlowSol,@preBuySharePct,@preUniqueBuyers,
-          @preLargestBuyerSharePct,@prePriceRunupPct,@updatedAtMs
+          @preLargestBuyerSharePct,@prePriceRunupPct,@parseVersion,@updatedAtMs
         )
       `),
       dumpUpdate: this.db.prepare(`
@@ -653,6 +671,7 @@ class ResearchStore {
       preUniqueBuyers: number(pre.uniqueBuyers),
       preLargestBuyerSharePct: number(pre.largestBuyerSharePct),
       prePriceRunupPct: number(pre.priceRunupPct),
+      parseVersion: value(dump.parseVersion || dump.signalTrade?.parseVersion),
       updatedAtMs: dump.detectedAtMs,
     });
   }
@@ -805,6 +824,16 @@ class ResearchStore {
 
   summary() {
     this.flush();
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
+    const dataQuality = this.db.prepare(`
+      SELECT COUNT(*) total,
+        SUM(CASE WHEN ? IS NULL OR parse_version=? THEN 1 ELSE 0 END) trusted_version,
+        SUM(CASE WHEN ? IS NOT NULL AND COALESCE(parse_version,'')<>? THEN 1 ELSE 0 END)
+          excluded_legacy_version,
+        SUM(CASE WHEN drop_pct>? THEN 1 ELSE 0 END) excluded_over_max_drop
+      FROM dump_events
+    `).get(acceptedVersion, acceptedVersion, acceptedVersion, acceptedVersion,
+      this.config.maxDumpDropPct);
     const dump = this.db.prepare(`
       SELECT COUNT(*) independent,
         SUM(CASE WHEN ordering_confidence='STRICT' THEN 1 ELSE 0 END) strict_ordering,
@@ -822,38 +851,60 @@ class ResearchStore {
         AVG(buy_to_dump_pct) average_buy_to_dump_pct,
         AVG(max_recovery_pct) average_max_recovery_pct
       FROM dump_events
-    `).get();
+      WHERE (drop_pct IS NULL OR drop_pct<=?)
+        AND (? IS NULL OR parse_version=?)
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion);
     const confirmation = this.db.prepare(`
-      SELECT COUNT(DISTINCT episode_id) recovered,
-        COUNT(DISTINCT CASE WHEN slot_delta=1 THEN episode_id END) next_slot_confirmations,
+      SELECT COUNT(DISTINCT c.episode_id) recovered,
+        COUNT(DISTINCT CASE WHEN c.slot_delta=1 THEN c.episode_id END) next_slot_confirmations,
         COUNT(*) total_confirmations
-      FROM confirmations
-    `).get();
+      FROM confirmations c
+      JOIN dump_events d ON d.episode_id=c.episode_id
+      WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+        AND (? IS NULL OR d.parse_version=?)
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion);
     const confirmationCoverage = this.db.prepare(`
       WITH coverage AS (
-        SELECT confirmation_id,episode_id,
+        SELECT c.confirmation_id,c.episode_id,
           EXISTS(SELECT 1 FROM simulations s
-            WHERE s.confirmation_id=confirmations.confirmation_id) has_simulation
-        FROM confirmations
+            WHERE s.confirmation_id=c.confirmation_id) has_simulation
+        FROM confirmations c
+        JOIN dump_events d ON d.episode_id=c.episode_id
+        WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+          AND (? IS NULL OR d.parse_version=?)
       )
       SELECT COUNT(*) total,
         SUM(has_simulation) with_simulation,
         SUM(CASE WHEN has_simulation=0 THEN 1 ELSE 0 END) without_simulation,
         COUNT(DISTINCT CASE WHEN has_simulation=1 THEN episode_id END) simulated_episodes
       FROM coverage
-    `).get();
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion);
     const sameSlot = this.db.prepare(`
+      WITH ranked AS (
+        SELECT o.*,CASE WHEN o.classification='STRICT_AFTER_DUMP' THEN
+          ROW_NUMBER() OVER (
+            PARTITION BY o.episode_id,o.classification
+            ORDER BY o.buy_transaction_index,o.instruction_index,o.event_index,o.observation_id
+          ) END post_dump_buy_rank
+        FROM same_slot_observations o
+        JOIN dump_events d ON d.episode_id=o.episode_id
+        WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+          AND (? IS NULL OR d.parse_version=?)
+      )
       SELECT COUNT(*) observations,
         SUM(CASE WHEN classification='STRICT_AFTER_DUMP' THEN 1 ELSE 0 END) strict_after_dump,
         SUM(CASE WHEN classification='SLOT_CORRELATED' THEN 1 ELSE 0 END) slot_correlated,
         COUNT(DISTINCT CASE WHEN classification='STRICT_AFTER_DUMP' THEN episode_id END)
           events_with_strict_buy,
+        SUM(CASE WHEN post_dump_buy_rank=1 THEN 1 ELSE 0 END) rank_1_buys,
+        SUM(CASE WHEN post_dump_buy_rank=2 THEN 1 ELSE 0 END) rank_2_buys,
+        COUNT(DISTINCT CASE WHEN post_dump_buy_rank<=2 THEN episode_id END) events_with_top_2_buys,
         AVG(receive_lag_ms) average_receive_lag_ms,
         AVG(buy_sol) average_buy_sol,
         SUM(buy_sol) total_buy_sol,
         SUM(executable) executable_signals
-      FROM same_slot_observations
-    `).get();
+      FROM ranked
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion);
     const simulationCounts = this.db.prepare(`
       SELECT COUNT(*) scheduled,
         SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
@@ -902,12 +953,19 @@ class ResearchStore {
         averageUniqueBuyers: dump.average_unique_buyers,
         averageBuyToDumpPct: dump.average_buy_to_dump_pct,
         averageMaxRecoveryPct: dump.average_max_recovery_pct,
+        totalStoredEvents: dataQuality.total || 0,
+        trustedVersionEvents: dataQuality.trusted_version || 0,
+        excludedLegacyPriceEvents: dataQuality.excluded_legacy_version || 0,
+        excludedOverMaxDropEvents: dataQuality.excluded_over_max_drop || 0,
       },
       sameSlotProbe: {
         observations: sameSlot.observations || 0,
         strictAfterDumpBuys: sameSlot.strict_after_dump || 0,
         slotCorrelatedBuys: sameSlot.slot_correlated || 0,
         eventsWithStrictBuy: sameSlot.events_with_strict_buy || 0,
+        rank1Buys: sameSlot.rank_1_buys || 0,
+        rank2Buys: sameSlot.rank_2_buys || 0,
+        eventsWithTop2Buys: sameSlot.events_with_top_2_buys || 0,
         eventRatePct: dump.independent
           ? (sameSlot.events_with_strict_buy || 0) / dump.independent * 100 : null,
         averageReceiveLagMs: sameSlot.average_receive_lag_ms,
@@ -1012,19 +1070,34 @@ class ResearchStore {
 
   recentDumps(limit = 100) {
     this.flush();
-    return this.db.prepare(`SELECT * FROM dump_events ORDER BY detected_at_ms DESC LIMIT ?`)
-      .all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
+    return this.db.prepare(`
+      SELECT * FROM dump_events
+      WHERE (drop_pct IS NULL OR drop_pct<=?)
+        AND (? IS NULL OR parse_version=?)
+      ORDER BY detected_at_ms DESC LIMIT ?
+    `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
   recentDumpsPage(page = 1, pageSize = 20) {
     this.flush();
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
     const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
-    const total = this.db.prepare('SELECT COUNT(*) count FROM dump_events').get().count;
+    const total = this.db.prepare(`
+      SELECT COUNT(*) count FROM dump_events
+      WHERE (drop_pct IS NULL OR drop_pct<=?)
+        AND (? IS NULL OR parse_version=?)
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion).count;
     const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
     const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
     const items = this.db.prepare(`
-      SELECT * FROM dump_events ORDER BY detected_at_ms DESC LIMIT ? OFFSET ?
-    `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+      SELECT * FROM dump_events
+      WHERE (drop_pct IS NULL OR drop_pct<=?)
+        AND (? IS NULL OR parse_version=?)
+      ORDER BY detected_at_ms DESC LIMIT ? OFFSET ?
+    `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      normalizedSize, (normalizedPage - 1) * normalizedSize);
     return {
       items,
       page: normalizedPage,
@@ -1042,20 +1115,52 @@ class ResearchStore {
 
   recentSameSlotObservations(limit = 100) {
     this.flush();
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
     return this.db.prepare(`
-      SELECT * FROM same_slot_observations ORDER BY observed_at_ms DESC LIMIT ?
-    `).all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
+      WITH ranked AS (
+        SELECT o.*,CASE WHEN o.classification='STRICT_AFTER_DUMP' THEN
+          ROW_NUMBER() OVER (
+            PARTITION BY o.episode_id,o.classification
+            ORDER BY o.buy_transaction_index,o.instruction_index,o.event_index,o.observation_id
+          ) END post_dump_buy_rank
+        FROM same_slot_observations o
+        JOIN dump_events d ON d.episode_id=o.episode_id
+        WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+          AND (? IS NULL OR d.parse_version=?)
+      )
+      SELECT * FROM ranked ORDER BY observed_at_ms DESC LIMIT ?
+    `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
   recentSameSlotObservationsPage(page = 1, pageSize = 20) {
     this.flush();
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
     const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
-    const total = this.db.prepare('SELECT COUNT(*) count FROM same_slot_observations').get().count;
+    const total = this.db.prepare(`
+      SELECT COUNT(*) count
+      FROM same_slot_observations o
+      JOIN dump_events d ON d.episode_id=o.episode_id
+      WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+        AND (? IS NULL OR d.parse_version=?)
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion).count;
     const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
     const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
     const items = this.db.prepare(`
-      SELECT * FROM same_slot_observations ORDER BY observed_at_ms DESC LIMIT ? OFFSET ?
-    `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+      WITH ranked AS (
+        SELECT o.*,CASE WHEN o.classification='STRICT_AFTER_DUMP' THEN
+          ROW_NUMBER() OVER (
+            PARTITION BY o.episode_id,o.classification
+            ORDER BY o.buy_transaction_index,o.instruction_index,o.event_index,o.observation_id
+          ) END post_dump_buy_rank
+        FROM same_slot_observations o
+        JOIN dump_events d ON d.episode_id=o.episode_id
+        WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+          AND (? IS NULL OR d.parse_version=?)
+      )
+      SELECT * FROM ranked ORDER BY observed_at_ms DESC LIMIT ? OFFSET ?
+    `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion, normalizedSize,
+      (normalizedPage - 1) * normalizedSize);
     return {
       items,
       page: normalizedPage,

@@ -9,10 +9,12 @@ const DISCRIMINATORS = Object.freeze({
   ammBuy: Buffer.from([103, 244, 82, 31, 44, 245, 119, 119]),
   ammSell: Buffer.from([62, 47, 55, 10, 165, 3, 220, 42]),
 });
+const PUMP_PARSE_VERSION = 'PUMP_PUBLIC_IDL_2026_08_TOKEN_CONTEXT_V3';
 
 function encodeBase58(value) {
   if (value == null) return null;
   if (typeof value === 'string') return value;
+  if (value?.pubkey != null) return encodeBase58(value.pubkey);
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return bs58.encode(Buffer.from(value));
   return null;
 }
@@ -124,18 +126,39 @@ function extractSignature(message) {
   return null;
 }
 
-function extractTokenContext(meta, wsolMint, fallbackDecimals) {
+function extractAccountKeys(message, meta) {
+  const transaction = message?.transaction?.transaction || message?.transaction || message;
+  const compiled = transaction?.message || transaction?.transaction?.message || {};
+  const staticKeys = compiled.accountKeys || compiled.account_keys
+    || compiled.staticAccountKeys || compiled.static_account_keys || [];
+  const loaded = meta?.loadedAddresses || meta?.loaded_addresses || {};
+  return [
+    ...staticKeys,
+    ...(loaded.writable || loaded.writableAddresses || loaded.writable_addresses || []),
+    ...(loaded.readonly || loaded.readonlyAddresses || loaded.readonly_addresses || []),
+  ].map(encodeBase58);
+}
+
+function extractTokenContexts(message, meta, wsolMint, fallbackDecimals) {
+  const accountKeys = extractAccountKeys(message, meta);
   const candidates = new Map();
   const collect = (balances, side) => {
     for (const balance of balances || []) {
       if (!balance?.mint || balance.mint === wsolMint) continue;
-      const row = candidates.get(balance.mint) || { mint: balance.mint, pre: 0n, post: 0n, decimals: null };
+      const row = candidates.get(balance.mint) || {
+        mint: balance.mint, pre: 0n, post: 0n, decimals: null, accounts: new Set(),
+      };
       const rawDecimals = balance?.uiTokenAmount?.decimals
         ?? balance?.ui_token_amount?.decimals ?? balance?.decimals;
       const decimals = rawDecimals == null ? null : Number(rawDecimals);
       if (Number.isInteger(decimals) && decimals >= 0) row.decimals = decimals;
       const amount = balance?.uiTokenAmount?.amount ?? balance?.ui_token_amount?.amount ?? '0';
       try { row[side] += BigInt(amount || 0); } catch (_) {}
+      const rawIndex = balance?.accountIndex ?? balance?.account_index;
+      const accountIndex = rawIndex == null ? null : Number(rawIndex);
+      if (Number.isInteger(accountIndex) && accountIndex >= 0 && accountKeys[accountIndex]) {
+        row.accounts.add(accountKeys[accountIndex]);
+      }
       candidates.set(balance.mint, row);
     }
   };
@@ -146,15 +169,30 @@ function extractTokenContext(meta, wsolMint, fallbackDecimals) {
     const rightDelta = right.post >= right.pre ? right.post - right.pre : right.pre - right.post;
     return leftDelta === rightDelta ? 0 : (leftDelta > rightDelta ? -1 : 1);
   });
-  if (ordered.length) {
-    const candidate = ordered[0];
+  const byAccount = new Map();
+  for (const candidate of ordered) {
+    for (const account of candidate.accounts) byAccount.set(account, candidate);
+  }
+  return { ordered, byAccount, fallbackDecimals };
+}
+
+function resolveTokenContext(contexts, baseTokenAccount) {
+  const accountMatch = baseTokenAccount ? contexts.byAccount.get(baseTokenAccount) : null;
+  const candidate = accountMatch || (contexts.ordered.length === 1 ? contexts.ordered[0] : null);
+  if (!candidate) {
     return {
-      mint: candidate.mint,
-      tokenDecimals: candidate.decimals ?? fallbackDecimals,
-      tokenDecimalsSource: candidate.decimals == null ? 'PUMP_DEFAULT' : 'TOKEN_BALANCE',
+      mint: null,
+      tokenDecimals: contexts.fallbackDecimals,
+      tokenDecimalsSource: contexts.ordered.length ? 'AMBIGUOUS_TOKEN_BALANCES' : 'PUMP_DEFAULT',
+      priceReliable: false,
     };
   }
-  return { mint: null, tokenDecimals: fallbackDecimals, tokenDecimalsSource: 'PUMP_DEFAULT' };
+  return {
+    mint: candidate.mint,
+    tokenDecimals: candidate.decimals ?? contexts.fallbackDecimals,
+    tokenDecimalsSource: candidate.decimals == null ? 'PUMP_DEFAULT' : 'TOKEN_ACCOUNT_BALANCE',
+    priceReliable: true,
+  };
 }
 
 function extractProgramData(logMessages) {
@@ -234,6 +272,10 @@ function decodeAmmBuy(data, context) {
   const wallet = reader.pubkey();
 
   const optional = {
+    userBaseTokenAccount: null,
+    userQuoteTokenAccount: null,
+    protocolFeeRecipient: null,
+    protocolFeeRecipientTokenAccount: null,
     coinCreator: null,
     coinCreatorFeeBasisPoints: 0n,
     coinCreatorFeeRaw: 0n,
@@ -246,10 +288,10 @@ function decodeAmmBuy(data, context) {
     baseSupplyRaw: null,
   };
   if (reader.remaining() > 0) {
-    reader.pubkey();
-    reader.pubkey();
-    reader.pubkey();
-    reader.pubkey();
+    optional.userBaseTokenAccount = reader.pubkey();
+    optional.userQuoteTokenAccount = reader.pubkey();
+    optional.protocolFeeRecipient = reader.pubkey();
+    optional.protocolFeeRecipientTokenAccount = reader.pubkey();
     optional.coinCreator = reader.pubkey();
     optional.coinCreatorFeeBasisPoints = reader.u64();
     optional.coinCreatorFeeRaw = reader.u64();
@@ -269,16 +311,17 @@ function decodeAmmBuy(data, context) {
     if (reader.remaining() >= 8) optional.baseSupplyRaw = reader.u64();
   }
 
-  const tokenAmount = rawToUnits(baseAmountRaw, context.tokenDecimals);
+  const token = resolveTokenContext(context.tokenContexts, optional.userBaseTokenAccount);
+  const tokenAmount = rawToUnits(baseAmountRaw, token.tokenDecimals);
   const solAmount = rawToUnits(userQuoteAmountRaw, 9);
   const reserve = reserveFields({
     poolBaseReservesRaw, poolQuoteReservesRaw,
     virtualQuoteReservesRaw: optional.virtualQuoteReservesRaw,
-  }, context);
+  }, token);
   return {
     type: 'ammTrade', market: 'PUMP_AMM', side: 'BUY',
-    mint: context.mint, tokenDecimals: context.tokenDecimals,
-    tokenDecimalsSource: context.tokenDecimalsSource,
+    mint: token.mint, tokenDecimals: token.tokenDecimals,
+    tokenDecimalsSource: token.tokenDecimalsSource, priceReliable: token.priceReliable,
     pool, wallet, chainTimestampMs, tokenAmount, solAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
     baseAmountRaw: baseAmountRaw.toString(),
@@ -288,6 +331,8 @@ function decodeAmmBuy(data, context) {
     quoteAmountInWithLpFeeRaw: quoteAmountInWithLpFeeRaw.toString(),
     userBaseTokenReservesRaw: userBaseTokenReservesRaw.toString(),
     userQuoteTokenReservesRaw: userQuoteTokenReservesRaw.toString(),
+    userBaseTokenAccount: optional.userBaseTokenAccount,
+    userQuoteTokenAccount: optional.userQuoteTokenAccount,
     ...reserve,
     ...feeFields({
       lpFeeBasisPoints: numeric(lpFeeBasisPoints), lpFeeRaw: lpFeeRaw.toString(),
@@ -325,6 +370,10 @@ function decodeAmmSell(data, context) {
   const wallet = reader.pubkey();
 
   const optional = {
+    userBaseTokenAccount: null,
+    userQuoteTokenAccount: null,
+    protocolFeeRecipient: null,
+    protocolFeeRecipientTokenAccount: null,
     coinCreator: null,
     coinCreatorFeeBasisPoints: 0n,
     coinCreatorFeeRaw: 0n,
@@ -337,10 +386,10 @@ function decodeAmmSell(data, context) {
     baseSupplyRaw: null,
   };
   if (reader.remaining() > 0) {
-    reader.pubkey();
-    reader.pubkey();
-    reader.pubkey();
-    reader.pubkey();
+    optional.userBaseTokenAccount = reader.pubkey();
+    optional.userQuoteTokenAccount = reader.pubkey();
+    optional.protocolFeeRecipient = reader.pubkey();
+    optional.protocolFeeRecipientTokenAccount = reader.pubkey();
     optional.coinCreator = reader.pubkey();
     optional.coinCreatorFeeBasisPoints = reader.u64();
     optional.coinCreatorFeeRaw = reader.u64();
@@ -353,16 +402,17 @@ function decodeAmmSell(data, context) {
     if (reader.remaining() >= 8) optional.baseSupplyRaw = reader.u64();
   }
 
-  const tokenAmount = rawToUnits(baseAmountRaw, context.tokenDecimals);
+  const token = resolveTokenContext(context.tokenContexts, optional.userBaseTokenAccount);
+  const tokenAmount = rawToUnits(baseAmountRaw, token.tokenDecimals);
   const solAmount = rawToUnits(userQuoteAmountRaw, 9);
   const reserve = reserveFields({
     poolBaseReservesRaw, poolQuoteReservesRaw,
     virtualQuoteReservesRaw: optional.virtualQuoteReservesRaw,
-  }, context);
+  }, token);
   return {
     type: 'ammTrade', market: 'PUMP_AMM', side: 'SELL',
-    mint: context.mint, tokenDecimals: context.tokenDecimals,
-    tokenDecimalsSource: context.tokenDecimalsSource,
+    mint: token.mint, tokenDecimals: token.tokenDecimals,
+    tokenDecimalsSource: token.tokenDecimalsSource, priceReliable: token.priceReliable,
     pool, wallet, chainTimestampMs, tokenAmount, solAmount,
     price: tokenAmount > 0 ? solAmount / tokenAmount : null,
     baseAmountRaw: baseAmountRaw.toString(),
@@ -372,6 +422,8 @@ function decodeAmmSell(data, context) {
     quoteAmountOutWithoutLpFeeRaw: quoteAmountOutWithoutLpFeeRaw.toString(),
     userBaseTokenReservesRaw: userBaseTokenReservesRaw.toString(),
     userQuoteTokenReservesRaw: userQuoteTokenReservesRaw.toString(),
+    userBaseTokenAccount: optional.userBaseTokenAccount,
+    userQuoteTokenAccount: optional.userQuoteTokenAccount,
     ...reserve,
     ...feeFields({
       lpFeeBasisPoints: numeric(lpFeeBasisPoints), lpFeeRaw: lpFeeRaw.toString(),
@@ -431,9 +483,10 @@ class PumpEventParser {
     const signature = extractSignature(message);
     const slot = extractSlot(message);
     const transactionIndex = extractTransactionIndex(message);
-    const token = extractTokenContext(meta, this.wsolMint, this.defaultTokenDecimals);
     const context = {
-      ...token,
+      tokenContexts: extractTokenContexts(
+        message, meta, this.wsolMint, this.defaultTokenDecimals,
+      ),
       pumpProgramId: this.pumpProgramId,
       ammProgramId: this.pumpAmmProgramId,
     };
@@ -444,6 +497,11 @@ class PumpEventParser {
       try {
         const event = decodeEvent(row.data, row.programId, context);
         if (!event) continue;
+        // A transaction may contain multiple non-WSOL mints. If the event's
+        // base token account cannot be matched to its own mint/decimals, using
+        // a transaction-wide fallback can create 1,000x price errors. Keep the
+        // ambiguous event out of all price and strategy calculations.
+        if (event.type === 'ammTrade' && !event.priceReliable) continue;
         events.push({
           ...event,
           signature,
@@ -455,7 +513,7 @@ class PumpEventParser {
           receivedAtMs,
           timestampMs: receivedAtMs,
           programId: row.programId,
-          parseVersion: 'PUMP_PUBLIC_IDL_2026_08_FEE_SEMANTICS_V2',
+          parseVersion: PUMP_PARSE_VERSION,
           orderingConfidence: transactionIndex == null ? 'SLOT_CORRELATED' : 'STRICT',
         });
       } catch (_) {
@@ -474,4 +532,5 @@ module.exports = {
   extractProgramData,
   extractSignature,
   extractTransactionIndex,
+  PUMP_PARSE_VERSION,
 };

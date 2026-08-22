@@ -15,6 +15,7 @@ async function main() {
   const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
     'PUMPSWAP_CPMM_EVENT_FEES_V1',
     'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
+    'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3',
   ]);
   if (removedInvalidFeeSimulations > 0) {
     console.log(`Removed ${removedInvalidFeeSimulations} simulations from invalid legacy execution models.`);

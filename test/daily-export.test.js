@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { ResearchStore } = require('../src/data/ResearchStore');
+const { PUMP_PARSE_VERSION } = require('../src/core/PumpEventParser');
 const { exportResearchWindow } = require('../scripts/export-research-window');
 
 test('daily export keeps a consistent 24-hour research window', () => {
@@ -30,11 +31,17 @@ test('daily export keeps a consistent 24-hour research window', () => {
   const dump = db.prepare(`
     INSERT INTO dump_events(
       episode_id,mint,pool,detected_at_ms,ordering_confidence,
-      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
-    ) VALUES(?,?,?,?,?,?,?,?,?)
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,parse_version,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
   `);
-  dump.run('old', 'old-mint', 'old-pool', startMs - 1, 'STRICT', '[]', 'EXPIRED', 0, startMs - 1);
-  dump.run('inside', 'mint', 'pool', startMs + 10, 'STRICT', '[]', 'CONFIRMED', 0, startMs + 20);
+  dump.run('old', 'old-mint', 'old-pool', startMs - 1, 'STRICT', '[]', 'EXPIRED', 0,
+    20, PUMP_PARSE_VERSION, startMs - 1);
+  dump.run('inside', 'mint', 'pool', startMs + 10, 'STRICT', '[]', 'CONFIRMED', 0,
+    20, PUMP_PARSE_VERSION, startMs + 20);
+  dump.run('legacy-parse', 'legacy-mint', 'legacy-pool', startMs + 11, 'STRICT', '[]',
+    'EXPIRED', 0, 20, 'LEGACY', startMs + 21);
+  dump.run('rug', 'rug-mint', 'rug-pool', startMs + 12, 'STRICT', '[]', 'EXPIRED', 0,
+    60, PUMP_PARSE_VERSION, startMs + 22);
 
   const confirmation = db.prepare(`
     INSERT INTO confirmations(

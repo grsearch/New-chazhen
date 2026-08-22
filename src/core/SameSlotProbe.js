@@ -44,6 +44,12 @@ class SameSlotProbe {
         this._remove(episodeId, dump.pool);
         continue;
       }
+      const signalDecimals = finite(dump.signalTrade?.tokenDecimals);
+      const tradeDecimals = finite(trade.tokenDecimals);
+      if (trade.mint !== dump.mint
+        || (signalDecimals != null && tradeDecimals != null && signalDecimals !== tradeDecimals)) {
+        continue;
+      }
       if (trade.side !== 'BUY') continue;
       if (trade.signature === dump.signature && trade.eventIndex === dump.eventIndex) continue;
 

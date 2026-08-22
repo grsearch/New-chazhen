@@ -1,12 +1,12 @@
-# Post-Dump Recovery / Toxic Flow Filter
+# Same-Slot Dump Backrun / Speed Research
 
-这是一个只做研究的 PumpSwap **Post-Dump Recovery / Toxic Flow Filter** 项目。它从
+这是一个只做研究的 PumpSwap **Same-Slot Dump Backrun** 项目。它从
 [Flow-Acceleration](https://github.com/grsearch/Flow-Acceleration) 的 Pump 事件解析、流式去重、
 储备报价和 SQLite 思路重建而来，但已删除旧 Shadow 策略、LiveTradingManager、Primary 信号、
 旧部署配置和历史数据库代码。
 
-项目将两个研究口径硬隔离：主策略只在下一 Slot 或后续 Slot 出现公开恢复证据后模拟入场；
-Same-Slot 只作为基础设施观察组，固定标记为不可执行，不生成确认、仓位或收益。
+首要目标是研究“大砸单后能否成为同 Slot 第1或第2笔买入，并快速退出”。后续 Slot 的
+Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有落地时，公开信息入场是否仍有收益。
 
 > 当前代码不会读取私钥，不会签名，也没有发送交易的实现。
 
@@ -16,27 +16,35 @@ Same-Slot 只作为基础设施观察组，固定标记为不可执行，不生�
 2. **Slot Assembler**：记录 `slot / transactionIndex / instructionIndex / eventIndex / signature`。
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
-4. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
-5. **Same-Slot Probe**：独立记录同 Slot 后续买单的严格排序、金额和本地接收延迟，永不触发交易模拟。
+4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
+5. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
 6. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
 7. **Execution Simulator**：分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。等待入场期间一旦出现二次砸盘，全部待入场组合立即取消；每个仓位还必须通过即时往返成本和双边流动性占用检查。
 
-程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除。旧 V1/V2 模拟不会与当前 V3 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
+程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
 8. **Research Store**：只把砸盘前5秒及其恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造止损成交价。
-9. **Minimal Dashboard**：分开展示 Same-Slot 观察、后续 Slot 主策略、Fill Rate、NO_EXIT、PF 和分组结果；同时显示独立已退出事件、盈利事件、确认模拟覆盖率和最大赢家事件贡献，避免把大量参数组合误当成独立样本。
+9. **Minimal Dashboard**：优先展示 Same-Slot 观察排名、链上交易位置和接收延迟；后续 Slot 恢复仅作为对照组，并继续显示 Fill Rate、NO_EXIT、PF、独立事件和最大赢家事件贡献，避免把大量参数组合误当成独立样本。
 
 ## 两条研究线
 
-### 主策略：Post-Dump Recovery
+### 核心方向：Same-Slot Dump Backrun
+
+Dashboard 的 `#1/#2` 表示砸盘后同 Slot 内已经上链的第1/第2笔严格排序买单。当前 LaserStream
+在交易执行后才提供事件，因此这些行只能测量竞争环境和本地观察延迟，不能声称本系统已经能够取得该排名。
+
+要把该方向变成可执行策略，需要单独的极速执行层：低延迟区块数据、预构建交易、Leader/Block Engine
+直发、动态 Priority Fee/Jito Tip、账户预热和落地排名回执。Jito Bundle只能保证自己提交的Bundle内部顺序，
+不能把已经执行的任意公开砸盘交易重新装进自己的Bundle。当前仓库尚未读取私钥或发送交易。
+
+- [Jito低延迟交易与Bundle说明](https://docs.jito.wtf/lowlatencytxnsend/)
+- [Jito低延迟区块数据说明](https://docs.jito.wtf/lowlatencytxnfeed/)
+
+### 对照组：Post-Dump Recovery
 
 恢复确认必须满足 `slotDelta > 0`。引擎和执行模拟器各自设有一道硬性防护，任何同 Slot 确认都不会进入
 `confirmations` 或 `simulations`。最早路径是“Slot N 砸盘 → Slot N+1 确认 → 确认后延迟报价入场”。
 
-### 观察组：Same-Slot Infrastructure Probe
-
-观察组只回答“砸盘完成后，同 Slot 是否还能看到后续买单，以及本地晚了多少毫秒”。有 transaction index 时记录
-`STRICT_AFTER_DUMP`，缺失时记录 `SLOT_CORRELATED`。两类记录的 `executable` 都永久为 `false`，不计入主策略的
-胜率、PF、Entry Fill 或收益。
+Post-Dump对照组不使用同Slot资金。恢复确认必须进入后续Slot，并继续统计延迟、容量和退出成功率。
 
 ## 初始研究组
 
@@ -46,7 +54,8 @@ Dump 分层：
 |---|---:|---:|---:|---:|
 | `D5-P15-Q20-A1` | 5% | 15% | 20 SOL | 1 分钟 |
 | `D10-P25-Q50-A5` | 10% | 25% | 50 SOL | 5 分钟 |
-| `D20-P40-Q100-A15` | 20% | 40% | 100 SOL | 15 分钟 |
+
+全局最大跌幅默认为40%；超过40%的卖单视为RUG/价格数据异常，不建立研究事件，也不进入Same-Slot或恢复收益统计。
 
 恢复确认：
 
@@ -72,13 +81,14 @@ Dump 分层：
 - [PumpSwap 官方 IDL](https://github.com/pump-fun/pump-public-docs/blob/main/idl/pump_amm.json)
 - [动态费用官方说明](https://github.com/pump-fun/pump-public-docs/blob/main/docs/FEE_PROGRAM_README.md)
 
-模拟器版本为 `PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3`：使用每笔事件的有效储备和可执行费率，再叠加配置的买卖滑点、
+模拟器版本为 `PUMPSWAP_CPMM_CAUSAL_CAPACITY_V4`：使用每笔事件的有效储备和可执行费率，再叠加配置的买卖滑点、
 Priority Fee、Jito Tip 与基础交易费。入场前会在加入 Shadow 买单后的反事实储备上计算立即卖回的SOL，默认拒绝即时净往返损失超过8%、买入或卖出流动性占用超过10%的仓位。它是事件流可实现性研究模型，不是链上 SDK 的逐指令报价替代品。
 
-V1 曾把 5000 bps 的 Buyback 分配比例误当成 50% 额外交易费；V2 虽修正费用，却允许确认后的等待期出现二次砸盘后继续入场。程序启动时会删除V1/V2派生模拟，但保留砸盘事件和恢复确认；这些确认会在Dashboard中标记为没有当前模型模拟，避免与V3收益混合。
+V1 曾把 5000 bps 的 Buyback 分配比例误当成 50% 额外交易费；V2 虽修正费用，却允许确认后的等待期出现二次砸盘后继续入场。旧事件解析没有把多Token交易中的Token Account精确映射到各自PumpSwap事件，可能产生1000倍级价格异常。当前解析版本会标记到每个砸盘事件；程序启动时会隔离旧解析事件并删除V1/V2/V3派生模拟，避免它们继续污染恢复率、Same-Slot反弹和收益统计。旧行不会自动物理删除。
 
 卖前价格优先使用 5 秒内最后一笔公开储备价格；缺失时才用 SellEvent 的卖后储备重建，并把来源写入数据库。
-Token 精度优先来自交易 Token Balance；缺失时使用 Pump 默认 6 位并标记 `PUMP_DEFAULT`。
+Token精度通过事件中的`user_base_token_account`映射到该账户自己的Token Balance。多Token交易无法完成账户映射时，
+整笔事件不参与价格和策略计算，禁止再使用“全交易余额变化最大的Mint”作为猜测。
 
 ## 安装与运行
 
@@ -175,7 +185,7 @@ node scripts/compact-event-window-db.js \
 - 仅靠事件流无法可靠计算 Top Holder 或钱包关联集群；当前只支持信号前已知的 Creator、配置名单和历史毒性记录。
 - 未使用 RPC 补历史池龄。进程启动前已经存在的池子以“已观察时长下限”表示，因此初期会保守地拒绝池龄门槛。
 - 当前退出报价使用退出时观察到的公开池状态，没有把 Shadow 买入后的反事实储备逐笔重放；审计显示现有样本偏差约 0.01%–0.5%，
-  对 5 SOL 影响更明显。V3 已在入场容量检查中正确更新一次买入后的储备，但持仓期间的后续公开成交仍未做完整反事实状态重放；实盘化前必须完成状态化回放。
+  对 5 SOL 影响更明显。V4 已在入场容量检查中正确更新一次买入后的储备，但持仓期间的后续公开成交仍未做完整反事实状态重放；实盘化前必须完成状态化回放。
 - 本项目不包含实盘执行。只有在 100–300 个独立事件、两个不重合时间窗口、全成本 PF ≥ 1.3、
   200–500ms 延迟仍为正、最差 5% 可控且 Exit Fill Rate 可接受后，才应讨论下一阶段。
 

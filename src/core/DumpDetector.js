@@ -12,6 +12,14 @@ function percent(part, whole) {
   return whole > 0 ? part / whole * 100 : null;
 }
 
+function comparablePoolTrade(left, right) {
+  if (!left || !right) return false;
+  if (left.pool !== right.pool || left.mint !== right.mint) return false;
+  const leftDecimals = finite(left.tokenDecimals);
+  const rightDecimals = finite(right.tokenDecimals);
+  return leftDecimals == null || rightDecimals == null || leftDecimals === rightDecimals;
+}
+
 function preWindowStats(rows) {
   const buys = rows.filter((row) => row.side === 'BUY');
   const sells = rows.filter((row) => row.side === 'SELL');
@@ -45,6 +53,7 @@ class DumpDetector {
     this.pools = new Map();
     this.migrations = new Map();
     this.lastDumpAt = new Map();
+    this.metrics = { incompatibleTradesIgnored: 0, overMaxDropIgnored: 0 };
   }
 
   observeMigration(event) {
@@ -58,10 +67,17 @@ class DumpDetector {
     const state = this.pools.get(trade.pool) || {
       pool: trade.pool,
       mint: trade.mint,
+      tokenDecimals: trade.tokenDecimals,
       firstSeenAt: at,
       lastAt: at,
       rows: [],
     };
+    if (state.mint !== trade.mint
+      || (state.tokenDecimals != null && trade.tokenDecimals != null
+        && Number(state.tokenDecimals) !== Number(trade.tokenDecimals))) {
+      this.metrics.incompatibleTradesIgnored += 1;
+      return null;
+    }
     // Only the causal price/pre-dump window needs individual trades in memory.
     // Pool age and inactivity are tracked separately on the lightweight state object.
     const rowRetentionMs = Math.max(this.config.preWindowMs, this.config.priceFreshMs);
@@ -71,7 +87,8 @@ class DumpDetector {
     const previous = state.rows.at(-1);
     const postPrice = reservePrice(trade);
     const reconstructed = reconstructPreSell(trade);
-    const previousPrice = previous && at - finite(previous.receivedAtMs, 0) <= this.config.priceFreshMs
+    const previousPrice = comparablePoolTrade(previous, trade)
+      && at - finite(previous.receivedAtMs, 0) <= this.config.priceFreshMs
       ? reservePrice(previous) : null;
     const prePrice = previousPrice > 0 ? previousPrice : reconstructed?.price;
     const prePriceSource = previousPrice > 0 ? 'PREVIOUS_PUBLIC_TRADE' : reconstructed?.source;
@@ -88,6 +105,8 @@ class DumpDetector {
       const dropPct = (1 - postPrice / prePrice) * 100;
       const sellToQuotePct = percent(sellSol, preQuoteSol);
       const sellTokenToReservePct = percent(sellTokens, preBaseTokens);
+      const maxDropPct = finite(this.config.maxDropPct, Infinity);
+      if (dropPct > maxDropPct) this.metrics.overMaxDropIgnored += 1;
       const migrationAt = this.migrations.get(trade.pool);
       const poolAgeMs = Math.max(0, at - (migrationAt || state.firstSeenAt));
       const poolAgeSource = migrationAt ? 'MIGRATION_EVENT' : 'OBSERVED_LOWER_BOUND';
@@ -95,6 +114,7 @@ class DumpDetector {
         sellToQuotePct != null
         && sellToQuotePct >= profile.minSellToQuotePct
         && dropPct >= profile.minDropPct
+        && dropPct <= maxDropPct
         && postQuoteSol >= profile.minPostQuoteSol
         && poolAgeMs >= profile.minPoolAgeMs
       ));
@@ -138,6 +158,7 @@ class DumpDetector {
     state.rows.push(trade);
     state.lastAt = at;
     state.mint = trade.mint;
+    state.tokenDecimals = trade.tokenDecimals;
     this.pools.set(trade.pool, state);
     this._sweep(at);
     return dump;
@@ -154,7 +175,11 @@ class DumpDetector {
   }
 
   health() {
-    return { trackedPools: this.pools.size, knownMigrations: this.migrations.size };
+    return {
+      trackedPools: this.pools.size,
+      knownMigrations: this.migrations.size,
+      ...this.metrics,
+    };
   }
 }
 

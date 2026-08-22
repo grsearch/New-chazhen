@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 const path = require('path');
+const { PUMP_PARSE_VERSION } = require('./core/PumpEventParser');
 
 function list(name, fallback = []) {
   const raw = process.env[name];
@@ -31,6 +32,7 @@ function boolean(name, fallback) {
 }
 
 const positionSizesSol = [1, 2, 5];
+const maxDumpDropPct = number('SDBR_MAX_DUMP_DROP_PCT', 40, { min: 1, max: 99 });
 
 const config = {
   pump: {
@@ -59,6 +61,8 @@ const config = {
     slotSummaryRetentionMs: integer('SDBR_SLOT_RETENTION_DAYS', 30, { min: 1, max: 90 }) * 86_400_000,
     maintenanceIntervalMs: integer('SDBR_DB_MAINTENANCE_MS', 600_000, { min: 60_000 }),
     maintenanceBatchMax: integer('SDBR_DB_MAINTENANCE_BATCH', 10_000, { min: 100, max: 100_000 }),
+    maxDumpDropPct,
+    acceptedDumpParseVersion: PUMP_PARSE_VERSION,
   },
   dashboard: {
     host: process.env.SDBR_DASHBOARD_HOST || '127.0.0.1',
@@ -83,10 +87,10 @@ const config = {
     priceFreshMs: 5_000,
     episodeCooldownMs: 10_000,
     stateRetentionMs: 30 * 60_000,
+    maxDropPct: maxDumpDropPct,
     profiles: [
       { id: 'D5-P15-Q20-A1', minSellToQuotePct: 5, minDropPct: 15, minPostQuoteSol: 20, minPoolAgeMs: 60_000 },
       { id: 'D10-P25-Q50-A5', minSellToQuotePct: 10, minDropPct: 25, minPostQuoteSol: 50, minPoolAgeMs: 5 * 60_000 },
-      { id: 'D20-P40-Q100-A15', minSellToQuotePct: 20, minDropPct: 40, minPostQuoteSol: 100, minPoolAgeMs: 15 * 60_000 },
     ],
   },
   toxic: {
@@ -145,7 +149,7 @@ const config = {
     exitDelayMs: 200,
     exitTimeoutMs: 2_000,
     exitGraceMs: 2_000,
-    quoteModel: 'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3',
+    quoteModel: 'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V4',
     buySlippageBps: number('SDBR_BUY_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     sellSlippageBps: number('SDBR_SELL_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     maxImmediateRoundTripLossPct: number('SDBR_MAX_ROUND_TRIP_LOSS_PCT', 8, { min: 0, max: 100 }),

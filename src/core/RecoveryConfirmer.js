@@ -67,6 +67,12 @@ class RecoveryConfirmer {
     for (const episodeId of [...ids]) {
       const state = this.episodes.get(episodeId);
       if (!state || !this._afterSignal(trade, state.dump)) continue;
+      const signalDecimals = finite(state.dump.signalTrade?.tokenDecimals);
+      const tradeDecimals = finite(trade.tokenDecimals);
+      if (trade.mint !== state.dump.mint
+        || (signalDecimals != null && tradeDecimals != null && signalDecimals !== tradeDecimals)) {
+        continue;
+      }
       const at = finite(trade.receivedAtMs ?? trade.timestampMs, this.now());
       const currentPrice = reservePrice(trade);
       const reserves = effectiveReserves(trade);

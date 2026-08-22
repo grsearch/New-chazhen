@@ -67,9 +67,9 @@ test('latest PumpSwap event preserves raw fees, decimals, and strict order coord
   assert.equal(event.instructionIndex, 0);
   assert.equal(event.eventIndex, 0);
   assert.equal(event.orderingConfidence, 'STRICT');
-  assert.equal(event.parseVersion, 'PUMP_PUBLIC_IDL_2026_08_FEE_SEMANTICS_V2');
+  assert.equal(event.parseVersion, 'PUMP_PUBLIC_IDL_2026_08_TOKEN_CONTEXT_V3');
   assert.equal(event.tokenDecimals, 8);
-  assert.equal(event.tokenDecimalsSource, 'TOKEN_BALANCE');
+  assert.equal(event.tokenDecimalsSource, 'TOKEN_ACCOUNT_BALANCE');
   assert.equal(event.solAmount, 0.992475);
   assert.equal(event.coinCreator, bs58.encode(key(7)));
   assert.equal(event.coinCreatorFeeBasisPoints, 50);
@@ -98,4 +98,58 @@ test('missing transaction index is explicitly not strict', () => {
   });
   assert.equal(events[0].transactionIndex, null);
   assert.equal(events[0].orderingConfidence, 'SLOT_CORRELATED');
+});
+
+test('multi-token transactions resolve decimals from the event base token account', () => {
+  const parser = new PumpEventParser({
+    pumpProgramId: PUMP, pumpAmmProgramId: AMM, wsolMint: WSOL, defaultTokenDecimals: 6,
+  });
+  const data = latestBuyEvent().toString('base64');
+  const accountKeys = [key(9), key(3), key(8)];
+  const events = parser.parseTransaction({
+    slot: 125,
+    index: 8,
+    signature: 'signature-multi-token',
+    transaction: { message: { accountKeys } },
+    meta: {
+      err: null,
+      preTokenBalances: [
+        { accountIndex: 1, mint: 'CorrectMint', uiTokenAmount: { decimals: 6, amount: '1' } },
+        { accountIndex: 2, mint: 'LargeUnrelatedMint', uiTokenAmount: { decimals: 9, amount: '1' } },
+      ],
+      postTokenBalances: [
+        { accountIndex: 1, mint: 'CorrectMint', uiTokenAmount: { decimals: 6, amount: '2' } },
+        { accountIndex: 2, mint: 'LargeUnrelatedMint', uiTokenAmount: { decimals: 9, amount: '999999999999' } },
+      ],
+      logMessages: [`Program ${AMM} invoke [1]`, `Program data: ${data}`, `Program ${AMM} success`],
+    },
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].mint, 'CorrectMint');
+  assert.equal(events[0].tokenDecimals, 6);
+  assert.equal(events[0].userBaseTokenAccount, bs58.encode(key(3)));
+});
+
+test('ambiguous multi-token events are excluded instead of being mispriced', () => {
+  const parser = new PumpEventParser({
+    pumpProgramId: PUMP, pumpAmmProgramId: AMM, wsolMint: WSOL, defaultTokenDecimals: 6,
+  });
+  const events = parser.parseTransaction({
+    slot: 126,
+    index: 9,
+    signature: 'signature-ambiguous',
+    meta: {
+      err: null,
+      preTokenBalances: [
+        { mint: 'MintA', uiTokenAmount: { decimals: 6, amount: '1' } },
+        { mint: 'MintB', uiTokenAmount: { decimals: 9, amount: '1' } },
+      ],
+      logMessages: [
+        `Program ${AMM} invoke [1]`,
+        `Program data: ${latestBuyEvent().toString('base64')}`,
+        `Program ${AMM} success`,
+      ],
+    },
+  });
+  assert.equal(events.length, 0);
 });

@@ -1,8 +1,8 @@
 {
-  "name": "post-dump-recovery-research",
+  "name": "same-slot-dump-backrun-research",
   "version": "2.0.0",
   "private": true,
-  "description": "Research-only Post-Dump Recovery and Toxic Flow Filter for PumpSwap.",
+  "description": "Research-only Same-Slot Dump Backrun speed and execution study for PumpSwap.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

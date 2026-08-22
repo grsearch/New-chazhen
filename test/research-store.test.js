@@ -112,6 +112,8 @@ test('research store batches events and reports NO_EXIT independently', () => {
   assert.equal(summary.dumps.nextSlotRecoveryRatePct, 100);
   assert.equal(summary.sameSlotProbe.observations, 1);
   assert.equal(summary.sameSlotProbe.strictAfterDumpBuys, 1);
+  assert.equal(summary.sameSlotProbe.rank1Buys, 1);
+  assert.equal(summary.sameSlotProbe.rank2Buys, 0);
   assert.equal(summary.sameSlotProbe.executableSignals, 0, 'store must force probe rows to non-executable');
   assert.equal(summary.execution.scheduled, 3);
   assert.equal(summary.execution.exitFilled, 1);
@@ -206,6 +208,74 @@ test('recent same-slot observations use bounded server-side pagination', () => {
   store.close();
 });
 
+test('same-slot observations expose strict post-dump chain rank', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('ranked','mint','pool',1,'STRICT','[]','OBSERVING',0,1)
+  `).run();
+  const insert = store.db.prepare(`
+    INSERT INTO same_slot_observations(
+      observation_id,episode_id,mint,pool,observed_at_ms,slot,
+      dump_transaction_index,buy_transaction_index,instruction_index,event_index,
+      classification,receive_lag_ms,buy_sol,executable,rejection_reason
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)
+  `);
+  insert.run('later-received-first', 'ranked', 'mint', 'pool', 20, 10, 5, 9, 0, 0,
+    'STRICT_AFTER_DUMP', 20, 1, 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE');
+  insert.run('chain-first', 'ranked', 'mint', 'pool', 30, 10, 5, 6, 0, 0,
+    'STRICT_AFTER_DUMP', 30, 1, 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE');
+  const page = store.recentSameSlotObservationsPage(1, 20);
+  const ranks = Object.fromEntries(page.items.map((row) => [row.observation_id, row.post_dump_buy_rank]));
+  assert.deepEqual(ranks, { 'chain-first': 1, 'later-received-first': 2 });
+  const summary = store.summary();
+  assert.equal(summary.sameSlotProbe.rank1Buys, 1);
+  assert.equal(summary.sameSlotProbe.rank2Buys, 1);
+  assert.equal(summary.sameSlotProbe.eventsWithTop2Buys, 1);
+  store.close();
+});
+
+test('legacy price parses and drops over 40 percent stay out of strategy statistics', () => {
+  const store = new ResearchStore({
+    dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
+    maxDumpDropPct: 40, acceptedDumpParseVersion: 'V3',
+  });
+  const insertDump = store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,parse_version,updated_at_ms
+    ) VALUES(?,?,?,?,?,'[]','OBSERVING',0,?,?,?)
+  `);
+  insertDump.run('trusted', 'mint-1', 'pool-1', 1, 'STRICT', 20, 'V3', 1);
+  insertDump.run('legacy', 'mint-2', 'pool-2', 2, 'STRICT', 20, 'V2', 2);
+  insertDump.run('rug', 'mint-3', 'pool-3', 3, 'STRICT', 60, 'V3', 3);
+  const insertObservation = store.db.prepare(`
+    INSERT INTO same_slot_observations(
+      observation_id,episode_id,mint,pool,observed_at_ms,slot,event_index,
+      classification,receive_lag_ms,buy_sol,executable,rejection_reason
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)
+  `);
+  for (const [index, episodeId] of ['trusted', 'legacy', 'rug'].entries()) {
+    insertObservation.run(
+      `observation-${episodeId}`, episodeId, `mint-${index + 1}`, `pool-${index + 1}`,
+      index + 1, 1, 0, 'STRICT_AFTER_DUMP', 10, 1,
+      'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
+    );
+  }
+
+  const summary = store.summary();
+  assert.equal(summary.dumps.independent, 1);
+  assert.equal(summary.dumps.totalStoredEvents, 3);
+  assert.equal(summary.dumps.excludedLegacyPriceEvents, 1);
+  assert.equal(summary.dumps.excludedOverMaxDropEvents, 1);
+  assert.equal(summary.sameSlotProbe.observations, 1);
+  assert.equal(store.recentDumpsPage(1, 20).total, 1);
+  assert.equal(store.recentSameSlotObservationsPage(1, 20).total, 1);
+  store.close();
+});
+
 test('obsolete small-position simulations can be removed without deleting current positions', () => {
   const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
   store.db.prepare(`
@@ -243,7 +313,7 @@ test('obsolete small-position simulations can be removed without deleting curren
   store.close();
 });
 
-test('invalid V1/V2 simulations can be removed without deleting V3 research data', () => {
+test('invalid V1/V2/V3 simulations can be removed without deleting V4 research data', () => {
   const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
   store.db.prepare(`
     INSERT INTO dump_events(
@@ -275,13 +345,18 @@ test('invalid V1/V2 simulations can be removed without deleting V3 research data
     'v3', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
     'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3', 'NO_ENTRY', 1, 1, 1,
   );
+  insert.run(
+    'v4', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
+    'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V4', 'NO_ENTRY', 1, 1, 1,
+  );
 
   const removed = store.deleteSimulationsByQuoteModels([
     'PUMPSWAP_CPMM_EVENT_FEES_V1', 'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
+    'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3',
   ]);
   const remaining = store.db.prepare('SELECT simulation_id FROM simulations').all();
 
-  assert.equal(removed, 2);
-  assert.deepEqual(remaining, [{ simulation_id: 'v3' }]);
+  assert.equal(removed, 3);
+  assert.deepEqual(remaining, [{ simulation_id: 'v4' }]);
   store.close();
 });
