@@ -62,7 +62,10 @@ class DumpDetector {
       lastAt: at,
       rows: [],
     };
-    const cutoff = at - this.config.stateRetentionMs;
+    // Only the causal price/pre-dump window needs individual trades in memory.
+    // Pool age and inactivity are tracked separately on the lightweight state object.
+    const rowRetentionMs = Math.max(this.config.preWindowMs, this.config.priceFreshMs);
+    const cutoff = at - rowRetentionMs;
     state.rows = state.rows.filter((row) => finite(row.receivedAtMs, 0) >= cutoff);
     const preRows = state.rows.filter((row) => finite(row.receivedAtMs, 0) >= at - this.config.preWindowMs);
     const previous = state.rows.at(-1);
@@ -138,6 +141,11 @@ class DumpDetector {
     this.pools.set(trade.pool, state);
     this._sweep(at);
     return dump;
+  }
+
+  recentTrades(pool, sinceMs = -Infinity) {
+    const rows = this.pools.get(pool)?.rows || [];
+    return rows.filter((row) => finite(row.receivedAtMs ?? row.timestampMs, 0) >= sinceMs);
   }
 
   _sweep(now) {

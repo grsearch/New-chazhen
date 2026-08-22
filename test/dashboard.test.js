@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('node:vm');
 const {
-  ResearchStore, compareCohortPerformance, returnStats,
+  ResearchStore, compareCohortPerformance, returnStats, eventConcentrationStats,
 } = require('../src/data/ResearchStore');
 const { DashboardServer } = require('../src/server/DashboardServer');
 
@@ -19,6 +19,14 @@ test('cohorts sort by win rate and then average net return', () => {
   ) < 0, 'average return breaks equal-win-rate ties');
   assert.ok(compareCohortPerformance(highWin, { winRatePct: null, averageNetReturnPct: null }) < 0);
   assert.equal(returnStats([]).profitFactor, null, 'PF is unknown when no trade has closed');
+  const eventStats = eventConcentrationStats([
+    { episodeId: 'winner', net_return_pct: 10 },
+    { episodeId: 'winner', net_return_pct: 5 },
+    { episodeId: 'loser', net_return_pct: -2 },
+  ]);
+  assert.equal(eventStats.resolvedEpisodes, 2);
+  assert.equal(eventStats.episodesWithAnyWin, 1);
+  assert.equal(eventStats.largestWinnerEventContributionPct, 100);
 });
 
 test('dashboard script parses and exposes paginated GMGN views', () => {
@@ -33,9 +41,11 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
   assert.match(source, /id="same-slot-pager"/);
   assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
-  assert.match(source, /<th>CLOSED<\/th>/);
+  assert.match(source, /<th>独立CLOSED<\/th>/);
+  assert.match(source, /<th>NO_ENTRY原因<\/th>/);
   assert.match(source, /<th>NO_EXIT原因<\/th>/);
   assert.match(source, /胜率 ↓ · 平均净收益 ↓/);
+  assert.match(source, /最大赢家事件贡献/);
   assert.match(source, /https:\/\/gmgn\.ai\/sol\/token\/\$\{encodeURIComponent\(value\)\}/);
   assert.match(source, /target="_blank" rel="noopener noreferrer"/);
 });

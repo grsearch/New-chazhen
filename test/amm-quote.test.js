@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  effectiveReserves, quoteBuy, quoteSell, reconstructPreSell,
+  effectiveReserves, quoteBuy, quoteSell, quoteImmediateRoundTrip, reconstructPreSell,
 } = require('../src/core/AmmQuote');
 
 function market(overrides = {}) {
@@ -39,6 +39,24 @@ test('capacity quotes include event fees, price impact, and configured slippage'
   assert.equal(sell.available, true);
   assert.ok(sell.proceedsSol < 0.1, 'round trip must lose fees and slippage in a flat pool');
   assert.ok(sell.proceedsSol > 0.09, 'a 50% buyback allocation must not become a 50% swap fee');
+});
+
+test('immediate round-trip capacity uses reserves after the shadow buy', () => {
+  const trade = market({ side: 'BUY' });
+  const roundTrip = quoteImmediateRoundTrip(trade, 1, {
+    buySlippageBps: 100,
+    sellSlippageBps: 100,
+  });
+  assert.equal(roundTrip.available, true);
+  assert.ok(roundTrip.roundTripLossPct > 0);
+  assert.ok(roundTrip.roundTripLossPct < 8);
+  assert.ok(roundTrip.entryLiquidityUsagePct > 1);
+  assert.ok(roundTrip.exitLiquidityUsagePct > 0);
+  assert.ok(
+    BigInt(roundTrip.afterBuy.effectiveQuoteReservesRaw)
+      > effectiveReserves(trade).quoteRaw,
+    'counterfactual buy must add curve input to quote reserves',
+  );
 });
 
 test('pre-sell reconstruction uses post reserves plus the pool-side quote out', () => {
