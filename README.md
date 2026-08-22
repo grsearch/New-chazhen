@@ -17,13 +17,14 @@ Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有�
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
 4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
-5. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
-6. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
-7. **Execution Simulator**：分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。等待入场期间一旦出现二次砸盘，全部待入场组合立即取消；每个仓位还必须通过即时往返成本和双边流动性占用检查。
+5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1/#2 入场，使用1/2/5 SOL和100/250/500/1000/2000ms快速退出；所有结果强制标记为不可执行理论成交。
+6. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
+7. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
+8. **Recovery Execution Simulator**：作为对照组，分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。等待入场期间一旦出现二次砸盘，全部待入场组合立即取消；每个仓位还必须通过即时往返成本和双边流动性占用检查。
 
 程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
-8. **Research Store**：只把砸盘前5秒及其恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造止损成交价。
-9. **Minimal Dashboard**：优先展示 Same-Slot 观察排名、链上交易位置和接收延迟；后续 Slot 恢复仅作为对照组，并继续显示 Fill Rate、NO_EXIT、PF、独立事件和最大赢家事件贡献，避免把大量参数组合误当成独立样本。
+9. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
+10. **Minimal Dashboard**：优先展示 Same-Slot Shadow收益组合、观察排名、链上交易位置和延迟分位数；后续 Slot 恢复仅作为对照组，并继续显示 Fill Rate、NO_EXIT、PF、独立事件和最大赢家事件贡献。
 
 ## 两条研究线
 
@@ -31,6 +32,20 @@ Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有�
 
 Dashboard 的 `#1/#2` 表示砸盘后同 Slot 内已经上链的第1/第2笔严格排序买单。当前 LaserStream
 在交易执行后才提供事件，因此这些行只能测量竞争环境和本地观察延迟，不能声称本系统已经能够取得该排名。
+
+Same-Slot Shadow V1 同时建立两种反事实研究路径：
+
+- `Rank #1`：以砸盘事件执行后的公开储备为理论入场状态。
+- `Rank #2`：只有观察到严格排序的第1笔真实买单后，才以该买单执行后的公开储备为理论入场状态。
+- 仓位固定为1/2/5 SOL，退出目标为入场后100/250/500/1000/2000ms。
+- 退出使用目标时点之后第一笔严格因果公开成交的储备报价；没有交易或没有可卖报价时分别记录`NO_EXIT`。
+- 每次入场都先检查即时买卖往返成本和双边流动性占用，并扣除AMM费用、滑点、基础费、Priority Fee与Jito Tip假设。
+- 默认速度预算为解析2ms、构建5ms、签名1ms、发送15ms；只用于和竞争买单的接收延迟计算理论余量，可通过`SDBR_SPEED_*_BUDGET_MS`调整。
+
+所有Shadow行都写入`infrastructure_executable=0`，并标记
+`POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE`。这个模型回答“如果能取得该排名，公开价格路径下收益如何”，
+不回答“现有LaserStream系统是否真的能取得该排名”。由于假设订单会改变池子状态，V1仍是公开储备路径近似，
+不是完整的反事实链上重放。
 
 要把该方向变成可执行策略，需要单独的极速执行层：低延迟区块数据、预构建交易、Leader/Block Engine
 直发、动态 Priority Fee/Jito Tip、账户预热和落地排名回执。Jito Bundle只能保证自己提交的Bundle内部顺序，
@@ -158,7 +173,7 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 
 程序不再永久保存全部 PumpSwap 成交。Dump Detector 只在内存里保留检测所需的5秒历史；一旦识别到砸盘，才回填该池的砸盘前窗口，并继续保存恢复确认、Shadow 入场和退出所使用的成交。结构化字段默认完整保留，重复的 `raw_json` 默认关闭。
 
-事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；`dump_events`、`confirmations`、`same_slot_observations`、`simulations` 与 `toxic_wallets` 不自动删除。SQLite 删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
+事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；`dump_events`、`confirmations`、`same_slot_observations`、`same_slot_shadow_simulations`、`simulations` 与 `toxic_wallets` 不自动删除。每个符合条件且非毒性的砸盘事件最多新增30条Same-Slot Shadow组合（2个排名×3个仓位×5个退出时点），不会恢复全网逐笔永久写入。SQLite 删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
 
 ```bash
 node scripts/compact-event-window-db.js \
@@ -175,6 +190,7 @@ node scripts/compact-event-window-db.js \
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、生存率和二次砸盘。
 - `confirmations`：R1/R2/LQ 的确认时点与全部恢复特征。
 - `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额和接收延迟。
+- `same_slot_shadow_simulations`：理论Rank #1/#2入场、速度预算、容量检查、快速退出和扣费收益。
 - `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
@@ -197,4 +213,5 @@ pnpm test
 ```
 
 测试覆盖有效储备、signed virtual reserve、逐笔费用、Token 精度、严格/相关 Slot 标签、
-Same-Slot 硬隔离、Creator 拒绝、多钱包恢复、延迟入场、延迟退出、SQLite 批量写入和 `NO_EXIT` 独立统计。
+Same-Slot Rank #1/#2 Shadow、100–2000ms快速退出、Creator 拒绝、多钱包恢复、延迟入场、
+延迟退出、SQLite 批量写入和 `NO_EXIT` 独立统计。

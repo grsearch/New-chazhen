@@ -136,6 +136,27 @@ const config = {
       },
     ],
   },
+  sameSlotShadow: {
+    enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', true),
+    targetRanks: [1, 2],
+    positionSizesSol,
+    exitHorizonsMs: [100, 250, 500, 1_000, 2_000],
+    exitTimeoutMs: integer('SDBR_SAME_SLOT_EXIT_TIMEOUT_MS', 2_000, { min: 100 }),
+    episodeRetentionMs: integer('SDBR_SAME_SLOT_RETENTION_MS', 5_000, { min: 2_000 }),
+    quoteModel: 'PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V1',
+    buySlippageBps: number('SDBR_BUY_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
+    sellSlippageBps: number('SDBR_SELL_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
+    maxImmediateRoundTripLossPct: number('SDBR_MAX_ROUND_TRIP_LOSS_PCT', 8, { min: 0, max: 100 }),
+    maxEntryLiquidityUsagePct: number('SDBR_MAX_ENTRY_LIQUIDITY_USAGE_PCT', 10, { min: 0.1, max: 100 }),
+    maxExitLiquidityUsagePct: number('SDBR_MAX_EXIT_LIQUIDITY_USAGE_PCT', 10, { min: 0.1, max: 100 }),
+    baseTxFeeSol: number('SDBR_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),
+    priorityFeeSol: number('SDBR_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
+    jitoTipSol: number('SDBR_JITO_TIP_SOL', 0, { min: 0 }),
+    parseBudgetMs: number('SDBR_SPEED_PARSE_BUDGET_MS', 2, { min: 0 }),
+    buildBudgetMs: number('SDBR_SPEED_BUILD_BUDGET_MS', 5, { min: 0 }),
+    signBudgetMs: number('SDBR_SPEED_SIGN_BUDGET_MS', 1, { min: 0 }),
+    sendBudgetMs: number('SDBR_SPEED_SEND_BUDGET_MS', 15, { min: 0 }),
+  },
   execution: {
     positionSizesSol,
     entryVariants: [
@@ -177,6 +198,7 @@ function validateConfig({ requireStream = true } = {}) {
   const errors = [];
   if (requireStream && config.stream.endpoints.length === 0) errors.push('SDBR_GRPC_ENDPOINTS is required');
   if (!config.execution.positionSizesSol.length) errors.push('at least one position size is required');
+  if (!config.sameSlotShadow.positionSizesSol.length) errors.push('at least one Same-Slot position size is required');
   if (!config.dump.profiles.length) errors.push('at least one dump profile is required');
   if (!config.recovery.profiles.length) errors.push('at least one recovery profile is required');
   if (errors.length) throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);

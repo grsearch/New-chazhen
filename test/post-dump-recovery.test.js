@@ -10,6 +10,7 @@ class MemoryStore {
     this.dumps = [];
     this.confirmations = [];
     this.sameSlotObservations = [];
+    this.sameSlotShadows = new Map();
     this.simulations = new Map();
   }
   listToxicWallets() { return []; }
@@ -17,6 +18,8 @@ class MemoryStore {
   insertDump(dump, toxic) { this.dumps.push({ dump, toxic }); }
   updateDump() {}
   insertSameSlotObservation(row) { this.sameSlotObservations.push(row); }
+  insertSameSlotShadow(row) { this.sameSlotShadows.set(row.shadowId, { ...row }); }
+  updateSameSlotShadow(row) { this.sameSlotShadows.set(row.shadowId, { ...row }); }
   insertConfirmation(row) { this.confirmations.push(row); }
   insertSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
   updateSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
@@ -46,6 +49,15 @@ function configuration() {
         minDropRecoveryPct: 20, minUniqueBuyers: 2, minBuySol: 0.5,
         minBuyToDumpPct: 15, requirePositiveNetFlow: false,
       }],
+    },
+    sameSlotShadow: {
+      enabled: true, targetRanks: [1, 2], positionSizesSol: [1], exitHorizonsMs: [100],
+      exitTimeoutMs: 2_000, episodeRetentionMs: 5_000,
+      quoteModel: 'SAME_SLOT_TEST', buySlippageBps: 0, sellSlippageBps: 0,
+      maxImmediateRoundTripLossPct: 100,
+      maxEntryLiquidityUsagePct: 100, maxExitLiquidityUsagePct: 100,
+      baseTxFeeSol: 0, priorityFeeSol: 0, jitoTipSol: 0,
+      parseBudgetMs: 2, buildBudgetMs: 5, signBudgetMs: 1, sendBudgetMs: 15,
     },
     execution: {
       positionSizesSol: [1],
@@ -104,8 +116,19 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   assert.equal(store.sameSlotObservations[0].classification, 'STRICT_AFTER_DUMP');
   assert.equal(store.sameSlotObservations[0].executable, false);
   assert.equal(store.sameSlotObservations[0].receiveLagMs, 100);
+  assert.equal(
+    store.sameSlotShadows.size, 0,
+    'shadow waits for the slot boundary before assigning final strict ranks',
+  );
 
   observe(trade({ at: base + 200, slot: 502, tx: 1, side: 'BUY', sol: 1.6, price: 7.3e-8, wallet: 'buyer-a', quoteSol: 73, sequence: 4 }));
+  assert.equal(store.sameSlotShadows.size, 2, 'rank 1 and rank 2 theoretical paths are tracked');
+  const rank1 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 1);
+  assert.equal(rank1.status, 'CLOSED');
+  assert.equal(rank1.infrastructureExecutable, false);
+  const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
+  assert.equal(rank2.status, 'CLOSED');
+  assert.equal(rank2.exitHorizonMs, 100);
   assert.equal(store.sameSlotObservations.length, 1, 'next-slot buys are not probe observations');
   observe(trade({ at: base + 250, slot: 502, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 5 }));
   assert.equal(store.confirmations.length, 1, 'two independent buyers and real recovery should confirm R1');
@@ -181,6 +204,38 @@ test('same-slot trades with a different mint precision cannot create fake reboun
   engine.observe(wrongDecimals);
   assert.equal(store.sameSlotObservations.length, 0);
   assert.equal(store.confirmations.length, 0);
+});
+
+test('Same-Slot Shadow assigns rank from chain order instead of receive order', () => {
+  const base = 1_800_047_000_000;
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store, now: () => base });
+  engine.observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 26,
+  }));
+  engine.observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 20,
+    price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 27,
+  }));
+  engine.observe(trade({
+    at: base + 50, slot: 2, tx: 3, side: 'BUY', sol: 1,
+    price: 7.7e-8, wallet: 'received-first', quoteSol: 77, sequence: 28,
+  }));
+  engine.observe(trade({
+    at: base + 60, slot: 2, tx: 2, side: 'BUY', sol: 1,
+    price: 7.5e-8, wallet: 'chain-first', quoteSol: 75, sequence: 29,
+  }));
+  engine.observe(trade({
+    at: base + 200, slot: 3, tx: 1, side: 'BUY', sol: 1,
+    price: 8e-8, wallet: 'next-slot', quoteSol: 80, sequence: 30,
+  }));
+
+  const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
+  assert.equal(rank2.entryReferenceSignature, 'sig-29');
+  assert.equal(rank2.competitorReceiveLagMs, 50, 'rank 2 competitor was received earlier');
+  const rank1 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 1);
+  assert.equal(rank1.competitorReceiveLagMs, 60, 'rank 1 follows transactionIndex, not arrival');
 });
 
 test('a second dump before delayed entry invalidates every pending shadow position', () => {

@@ -59,6 +59,16 @@ test('daily export keeps a consistent 24-hour research window', () => {
     'inside:buy', 'inside', 'mint', 'pool', startMs + 11, 10, 0,
     'STRICT_AFTER_DUMP', 1, 0.5, 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
   );
+  db.prepare(`
+    INSERT INTO same_slot_shadow_simulations(
+      shadow_id,episode_id,target_rank,position_sol,exit_horizon_ms,quote_model,status,
+      infrastructure_mode,infrastructure_executable,infrastructure_reason,
+      entry_assumption,entry_reference_rank,entry_at_ms,created_at_ms,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,'THEORETICAL_ONLY',0,?,'THEORETICAL',0,?,?,?)
+  `).run(
+    'inside:rank1', 'inside', 1, 1, 250, 'SAME_SLOT_V1', 'NO_EXIT',
+    'POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE', startMs + 10, startMs + 10, startMs + 20,
+  );
   db.close();
 
   const result = exportResearchWindow({
@@ -74,6 +84,9 @@ test('daily export keeps a consistent 24-hour research window', () => {
     'confirmation follows the selected dump even when it closes just after the window boundary',
   );
   assert.equal(exported.prepare('SELECT COUNT(*) count FROM same_slot_observations').get().count, 1);
+  assert.equal(
+    exported.prepare('SELECT COUNT(*) count FROM same_slot_shadow_simulations').get().count, 1,
+  );
   assert.deepEqual(exported.pragma('foreign_key_check'), []);
   exported.close();
   assert.match(fs.readFileSync(schema, 'utf8'), /same_slot_observations/);

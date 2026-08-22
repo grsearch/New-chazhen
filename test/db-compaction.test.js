@@ -31,6 +31,14 @@ test('database compactor preserves research results and only causal trade window
         matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
       ) VALUES('episode','mint-pool','pool',10000,'STRICT','[]','OBSERVING',0,10000)
     `).run();
+    source.db.prepare(`
+      INSERT INTO same_slot_shadow_simulations(
+        shadow_id,episode_id,target_rank,position_sol,exit_horizon_ms,quote_model,status,
+        infrastructure_mode,infrastructure_executable,infrastructure_reason,
+        entry_assumption,entry_reference_rank,entry_at_ms,created_at_ms,updated_at_ms
+      ) VALUES('shadow','episode',1,1,250,'V1','NO_EXIT','THEORETICAL_ONLY',0,
+        'NO_GUARANTEE','THEORETICAL',0,10000,10000,12000)
+    `).run();
     source.recordTrade(trade('inside-pre', 6_000));
     source.recordTrade(trade('inside-post', 20_000));
     source.recordTrade(trade('outside-time', 4_000));
@@ -50,6 +58,10 @@ test('database compactor preserves research results and only causal trade window
       { signature: 'inside-pre', raw_json: null },
     ]);
     assert.equal(compact.db.prepare('SELECT COUNT(*) count FROM dump_events').get().count, 1);
+    assert.equal(
+      compact.db.prepare('SELECT COUNT(*) count FROM same_slot_shadow_simulations').get().count,
+      1,
+    );
     compact.close();
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

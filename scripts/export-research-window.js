@@ -29,6 +29,10 @@ const EXPLICIT_FILTERS = Object.freeze({
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
     bind: () => [],
   },
+  same_slot_shadow_simulations: {
+    where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
+    bind: () => [],
+  },
   simulations: {
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
     bind: () => [],
@@ -125,7 +129,8 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
         WHEN 'schema_meta' THEN 1 WHEN 'trades' THEN 2 WHEN 'slot_summaries' THEN 3
         WHEN 'dump_events' THEN 4 WHEN 'confirmations' THEN 5
         WHEN 'same_slot_observations' THEN 6 WHEN 'simulations' THEN 7
-        WHEN 'toxic_wallets' THEN 8 ELSE 20 END, name
+        WHEN 'same_slot_shadow_simulations' THEN 7 WHEN 'simulations' THEN 8
+        WHEN 'toxic_wallets' THEN 9 ELSE 20 END, name
     `).all();
     for (const table of sourceTables) {
       const columns = db.prepare(`PRAGMA source.table_info(${quoteIdentifier(table.name)})`)

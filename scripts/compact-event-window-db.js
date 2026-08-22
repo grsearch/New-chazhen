@@ -25,6 +25,12 @@ function columns(db, schema, table) {
     .all().map((row) => row.name);
 }
 
+function tableExists(db, schema, table) {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM ${quoted(schema)}.sqlite_master WHERE type='table' AND name=?
+  `).get(table));
+}
+
 function copyTable(db, table) {
   const destination = columns(db, 'main', table);
   const source = new Set(columns(db, 'source', table));
@@ -57,8 +63,11 @@ function compactDatabase({ sourcePath, destinationPath, preWindowMs = 5_000, pos
     const copied = {};
     const migrate = db.transaction(() => {
       for (const table of [
-        'dump_events', 'confirmations', 'same_slot_observations', 'simulations', 'toxic_wallets',
-      ]) copied[table] = copyTable(db, table);
+        'dump_events', 'confirmations', 'same_slot_observations',
+        'same_slot_shadow_simulations', 'simulations', 'toxic_wallets',
+      ]) {
+        copied[table] = tableExists(db, 'source', table) ? copyTable(db, table) : 0;
+      }
 
       const destinationColumns = columns(db, 'main', 'trades');
       const sourceColumns = new Set(columns(db, 'source', 'trades'));

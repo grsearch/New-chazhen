@@ -5,6 +5,7 @@ const { ToxicFlowFilter } = require('./ToxicFlowFilter');
 const { RecoveryConfirmer } = require('./RecoveryConfirmer');
 const { ExecutionSimulator } = require('./ExecutionSimulator');
 const { SameSlotProbe } = require('./SameSlotProbe');
+const { SameSlotShadowSimulator } = require('./SameSlotShadowSimulator');
 
 class PostDumpRecoveryEngine {
   constructor({ config, store, now = () => Date.now() }) {
@@ -19,6 +20,9 @@ class PostDumpRecoveryEngine {
       now,
     });
     this.sameSlotProbe = new SameSlotProbe();
+    this.sameSlotShadow = new SameSlotShadowSimulator({
+      config: config.sameSlotShadow || { enabled: false }, store, now,
+    });
     this.execution = new ExecutionSimulator({ config: config.execution, store, now });
     this.metrics = {
       events: 0,
@@ -28,6 +32,7 @@ class PostDumpRecoveryEngine {
       confirmations: 0,
       blockedSameSlotConfirmations: 0,
       sameSlotObservations: 0,
+      sameSlotShadowUpdates: 0,
       researchTradeWrites: 0,
       errors: 0,
       lastEventAtMs: null,
@@ -48,7 +53,8 @@ class PostDumpRecoveryEngine {
     // Persist only causal research windows. DumpDetector still keeps the short
     // pre-window in memory, so unrelated PumpSwap traffic never reaches SQLite.
     const activeResearchWindow = this.recovery.isObservingPool(event.pool)
-      || this.execution.isTrackingPool(event.pool);
+      || this.execution.isTrackingPool(event.pool)
+      || this.sameSlotShadow.isTrackingPool(event.pool);
     if (activeResearchWindow) {
       this.store.recordTrade(event);
       this.metrics.researchTradeWrites += 1;
@@ -61,6 +67,8 @@ class PostDumpRecoveryEngine {
       this.store.insertSameSlotObservation?.(observation);
       this.metrics.sameSlotObservations += 1;
     }
+    this.metrics.sameSlotShadowUpdates += this.sameSlotShadow
+      .observeTrade(event, sameSlotObservations).length;
     for (const snapshot of recoveryResult.updates) this.store.updateDump(snapshot);
     for (const outcome of recoveryResult.toxicOutcomes) {
       this.toxicFilter.recordToxicOutcome(
@@ -86,6 +94,7 @@ class PostDumpRecoveryEngine {
       this.store.insertDump(dump, toxic);
       const initial = this.recovery.startEpisode(dump, toxic);
       this.sameSlotProbe.startEpisode(dump);
+      this.metrics.sameSlotShadowUpdates += this.sameSlotShadow.startEpisode(dump, toxic).length;
       this.store.updateDump(initial);
       this.metrics.dumps += 1;
       dump.toxic = toxic;
@@ -99,19 +108,21 @@ class PostDumpRecoveryEngine {
     const expired = this.recovery.advanceTime(now);
     for (const snapshot of expired) this.store.updateDump(snapshot);
     this.sameSlotProbe.advanceTime(now);
+    this.sameSlotShadow.advanceTime(now);
     this.execution.advanceTime(now);
     this.store.flush();
   }
 
   health() {
     return {
-      mode: 'RESEARCH_ONLY_POST_DUMP_RECOVERY',
+      mode: 'RESEARCH_ONLY_SAME_SLOT_SHADOW',
       sendsTransactions: false,
       ...this.metrics,
       dumpDetector: this.dumpDetector.health(),
       toxicFilter: this.toxicFilter.health(),
       recovery: this.recovery.health(),
       sameSlotProbe: this.sameSlotProbe.health(),
+      sameSlotShadow: this.sameSlotShadow.health(),
       execution: this.execution.health(),
     };
   }

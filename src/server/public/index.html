@@ -55,6 +55,10 @@
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
   <section class="panel">
+    <div class="panel-head"><h2>核心：Same-Slot Shadow（目标排名 × 仓位 × 快速退出）</h2><span class="sort-note">理论成交 · 默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="table-wrap"><table id="same-slot-shadow"></table></div><div class="pager" id="same-slot-shadow-pager"></div>
+  </section>
+  <section class="panel">
     <div class="panel-head"><h2>核心：Same-Slot 速度与链上排名（当前仅观察）</h2><span class="sort-note">按观察时间从新到旧</span></div>
     <div class="table-wrap"><table id="same-slot"></table></div><div class="pager" id="same-slot-pager"></div>
   </section>
@@ -69,7 +73,7 @@
 </main>
 <script>
 const PAGE_SIZE=20;
-const state={cohortPage:1,sameSlotPage:1,dumpPage:1,cohorts:[]};
+const state={cohortPage:1,shadowPage:1,sameSlotPage:1,dumpPage:1,cohorts:[],shadowCohorts:[]};
 let refreshVersion=0;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
@@ -132,6 +136,22 @@ function renderCohorts(){
   document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+body;
   pager('#cohort-pager','cohort',state.cohortPage,totalPages,rows.length);
 }
+function renderShadowCohorts(){
+  const rows=[...state.shadowCohorts].sort(compareCohorts);
+  const totalPages=pageCount(rows.length);
+  state.shadowPage=Math.min(Math.max(1,state.shadowPage),totalPages);
+  const start=(state.shadowPage-1)*PAGE_SIZE;
+  const visible=rows.slice(start,start+PAGE_SIZE);
+  const body=visible.length?visible.map((r,index)=>{
+    const ret=r.averageNetReturnPct;
+    const key=`Rank#${r.targetRank}/${r.positionSol}SOL/${r.exitHorizonMs}ms`;
+    const independent=r.resolvedEpisodes??r.resolved??0;
+    const sample=independent<30?'<span class="sample">样本不足</span>':'';
+    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="13">暂无 Same-Slot Shadow 数据</td></tr>';
+  document.querySelector('#same-slot-shadow').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>理论Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th><th>可执行性</th></tr>'+body;
+  pager('#same-slot-shadow-pager','shadow',state.shadowPage,totalPages,rows.length);
+}
 function renderDumps(result){
   state.dumpPage=result.page;
   const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pricePct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无砸盘事件</td></tr>';
@@ -148,6 +168,11 @@ function changePage(kind,page){
   if(kind==='cohort'){
     state.cohortPage=page;
     renderCohorts();
+    return;
+  }
+  if(kind==='shadow'){
+    state.shadowPage=page;
+    renderShadowCohorts();
     return;
   }
   if(kind==='sameSlot'){
@@ -167,19 +192,23 @@ async function refresh(){
     ]);
     if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
-    const d=summary.dumps,s=summary.sameSlotProbe,e=summary.execution;
-    const cards=[['同Slot第1买入样本',s.rank1Buys],['同Slot第2买入样本',s.rank2Buys],['有严格同Slot买入的事件',s.eventsWithStrictBuy],['平均观察延迟',s.averageReceiveLagMs==null?'—':`${fmt(s.averageReceiveLagMs,0)}ms`],['独立砸盘事件',d.independent],['后续Slot恢复事件',d.recoveredEpisodes],['对照组独立已退出',e.resolvedEpisodes],['对照组扣费 PF',fmt(e.profitFactor)],['最大赢家事件贡献',pct(e.largestWinnerEventContributionPct)]];
+    const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution;
+    const cards=[['Shadow独立已退出',sh.resolvedEpisodes],['Shadow胜率',pct(sh.winRatePct)],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['Shadow扣费PF',fmt(sh.profitFactor)],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2延迟P50',s.rank2ReceiveLagP50Ms==null?'—':`${fmt(s.rank2ReceiveLagP50Ms,0)}ms`],['同Slot第1/2样本',`${s.rank1Buys??0}/${s.rank2Buys??0}`],['独立砸盘事件',d.independent],['对照组独立已退出',e.resolvedEpisodes]];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
     const notices=[];
+    notices.push('<strong>Shadow口径：</strong>Rank#1/#2均为理论入场，使用之后第一笔严格因果公开储备作为退出报价；当前程序不签名、不发送交易');
     notices.push('<strong>速度口径：</strong>排名#1/#2是已经上链的竞争者买单；LaserStream收到时交易已经执行，不能当成本系统可获得的成交排名');
     if(metric(d.excludedLegacyPriceEvents)>0)notices.push(`<strong>${d.excludedLegacyPriceEvents}</strong> 个旧价格解析事件已隔离，不参与任何策略统计`);
     if(metric(d.excludedOverMaxDropEvents)>0)notices.push(`<strong>${d.excludedOverMaxDropEvents}</strong> 个跌幅超过40%的RUG候选已排除`);
-    if(metric(e.resolvedEpisodes)<100)notices.push(`<span class="warning">独立已退出事件仅 ${e.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
-    if(metric(e.largestWinnerEventContributionPct)>50)notices.push(`最大赢家事件贡献全部正收益的 <strong>${pct(e.largestWinnerEventContributionPct)}</strong>`);
+    if(metric(sh.resolvedEpisodes)<100)notices.push(`<span class="warning">Same-Slot Shadow独立已退出事件仅 ${sh.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
+    if(metric(sh.largestWinnerEventContributionPct)>50)notices.push(`Shadow最大赢家事件贡献全部正收益的 <strong>${pct(sh.largestWinnerEventContributionPct)}</strong>`);
     if(metric(e.confirmationsWithoutSimulation)>0)notices.push(`<strong>${e.confirmationsWithoutSimulation}</strong> 个历史确认没有有效模拟记录`);
-    notices.push(`页面中的 ${e.scheduled??0} 条组合记录来自 <strong>${e.simulatedEpisodes??0}</strong> 个独立模拟事件，不能视为 ${e.scheduled??0} 个独立样本`);
+    notices.push(`Shadow中的 ${sh.scheduled??0} 条组合记录来自 <strong>${sh.episodes??0}</strong> 个独立砸盘事件，不能把参数组合数当成独立样本`);
+    if(metric(e.scheduled)>0)notices.push(`对照组中的 ${e.scheduled} 条组合记录来自 <strong>${e.simulatedEpisodes??0}</strong> 个独立模拟事件`);
     document.querySelector('#research-notice').innerHTML=notices.join(' · ');
     state.cohorts=summary.cohorts||[];
+    state.shadowCohorts=summary.sameSlotShadowCohorts||[];
+    renderShadowCohorts();
     renderCohorts();
     renderSameSlot(sameSlotPage);
     renderDumps(dumpPage);

@@ -40,9 +40,14 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /pageSize=\$\{PAGE_SIZE\}/);
   assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
   assert.match(source, /id="same-slot-pager"/);
+  assert.match(source, /id="same-slot-shadow-pager"/);
+  assert.match(source, /Same-Slot Shadow（目标排名 × 仓位 × 快速退出）/);
+  assert.match(source, /Rank#\$\{r\.targetRank\}/);
+  assert.match(source, /Shadow平均净收益/);
+  assert.match(source, /Rank#1延迟P50/);
   assert.match(source, /<th>观测排名<\/th>/);
   assert.match(source, /<th>链上Tx位置<\/th>/);
-  assert.match(source, /同Slot第1买入样本/);
+  assert.match(source, /同Slot第1\/2样本/);
   assert.match(source, /数据异常\/旧解析/);
   assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
   assert.match(source, /<th>独立CLOSED<\/th>/);

@@ -1,0 +1,375 @@
+'use strict';
+
+const {
+  quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
+} = require('./AmmQuote');
+const { strictlyAfter } = require('./SlotAssembler');
+
+function finite(value, fallback = null) {
+  if (value == null || value === '') return fallback;
+  const result = Number(value);
+  return Number.isFinite(result) ? result : fallback;
+}
+
+function sameAsset(dump, trade) {
+  if (!dump || !trade || dump.pool !== trade.pool || dump.mint !== trade.mint) return false;
+  const signalDecimals = finite(dump.signalTrade?.tokenDecimals);
+  const tradeDecimals = finite(trade.tokenDecimals);
+  return signalDecimals == null || tradeDecimals == null || signalDecimals === tradeDecimals;
+}
+
+function causallyAfter(candidate, reference) {
+  const candidateSlot = finite(candidate?.slot);
+  const referenceSlot = finite(reference?.slot);
+  if (candidateSlot == null || referenceSlot == null) return false;
+  if (candidateSlot !== referenceSlot) return candidateSlot > referenceSlot;
+  return strictlyAfter(candidate, reference) === true;
+}
+
+class SameSlotShadowSimulator {
+  constructor({ config, store = null, now = () => Date.now() }) {
+    this.config = config;
+    this.store = store;
+    this.now = now;
+    this.txFeeSol = transactionFeeSol(config);
+    this.responseBudgetMs = [
+      config.parseBudgetMs, config.buildBudgetMs, config.signBudgetMs, config.sendBudgetMs,
+    ].reduce((sum, value) => sum + Math.max(0, finite(value, 0)), 0);
+    this.episodes = new Map();
+    this.episodesByPool = new Map();
+    this.simulations = new Map();
+    this.simulationsByPool = new Map();
+    this.metrics = {
+      eligibleEpisodes: 0,
+      toxicEpisodesSkipped: 0,
+      scheduled: 0,
+      entryFilled: 0,
+      noEntry: 0,
+      exitFilled: 0,
+      noExit: 0,
+      rank1Entries: 0,
+      rank2Entries: 0,
+      insufficientRoundTripLiquidity: 0,
+      roundTripCostTooHigh: 0,
+    };
+  }
+
+  startEpisode(dump, toxic = {}) {
+    if (!this.config.enabled || !dump?.episodeId || !dump.pool || !dump.signalTrade) return [];
+    if (toxic.rejected) {
+      this.metrics.toxicEpisodesSkipped += 1;
+      return [];
+    }
+    this.episodes.set(dump.episodeId, { dump, trades: [], finalized: false });
+    const episodeIds = this.episodesByPool.get(dump.pool) || new Set();
+    episodeIds.add(dump.episodeId);
+    this.episodesByPool.set(dump.pool, episodeIds);
+    this.metrics.eligibleEpisodes += 1;
+    return [];
+  }
+
+  observeTrade(trade) {
+    if (!this.config.enabled || !trade?.pool) return [];
+    const changed = [];
+    const finalizedNow = new Set();
+    const episodeIds = this.episodesByPool.get(trade.pool);
+    for (const episodeId of [...(episodeIds || [])]) {
+      const state = this.episodes.get(episodeId);
+      const dump = state?.dump;
+      if (!state || state.finalized || !sameAsset(dump, trade)) continue;
+      const tradeSlot = finite(trade.slot);
+      const dumpSlot = finite(dump.slot);
+      if (tradeSlot == null || dumpSlot == null || tradeSlot < dumpSlot) continue;
+      if (tradeSlot === dumpSlot) {
+        if (causallyAfter(trade, dump.signalTrade)) state.trades.push(trade);
+        continue;
+      }
+      state.trades.push(trade);
+      changed.push(...this._finalizeEpisode(state));
+      for (const buffered of state.trades) {
+        changed.push(...this._processExitTrade(buffered, new Set([episodeId])));
+      }
+      finalizedNow.add(episodeId);
+    }
+    changed.push(...this._processExitTrade(trade, null, finalizedNow));
+    return changed;
+  }
+
+  _processExitTrade(trade, onlyEpisodes = null, skipEpisodes = new Set()) {
+    const changed = [];
+    const ids = this.simulationsByPool.get(trade.pool);
+    if (!ids?.size) return changed;
+    const at = finite(trade.receivedAtMs ?? trade.timestampMs, this.now());
+    for (const shadowId of [...ids]) {
+      const simulation = this.simulations.get(shadowId);
+      if (!simulation || simulation.status !== 'PENDING_EXIT') continue;
+      if (onlyEpisodes && !onlyEpisodes.has(simulation.episodeId)) continue;
+      if (skipEpisodes.has(simulation.episodeId)) continue;
+      if (!sameAsset(simulation.dump, trade) || at < simulation.requestedExitAtMs) continue;
+      if (!causallyAfter(trade, simulation.entryReferenceOrder)) continue;
+      simulation.postHorizonTrades += 1;
+      const sell = quoteSell(trade, simulation.tokenUnits, {
+        slippageBps: this.config.sellSlippageBps,
+      });
+      if (!sell.available) {
+        simulation.updatedAtMs = at;
+        this.store?.updateSameSlotShadow?.(simulation);
+        changed.push(simulation);
+        continue;
+      }
+      this._close(simulation, trade, at, sell);
+      changed.push(simulation);
+    }
+    return changed;
+  }
+
+  advanceTime(now = this.now()) {
+    const changed = [];
+    const retentionMs = Math.max(1, finite(this.config.episodeRetentionMs, 5_000));
+    for (const state of [...this.episodes.values()]) {
+      if (now - state.dump.detectedAtMs <= retentionMs) continue;
+      changed.push(...this._finalizeEpisode(state));
+      for (const buffered of state.trades) {
+        changed.push(...this._processExitTrade(buffered, new Set([state.dump.episodeId])));
+      }
+    }
+    for (const simulation of this.simulations.values()) {
+      if (simulation.status !== 'PENDING_EXIT' || now <= simulation.exitDeadlineAtMs) continue;
+      simulation.status = 'NO_EXIT';
+      simulation.rejectionReason = simulation.postHorizonTrades > 0
+        ? 'NO_CAUSAL_EXIT_QUOTE' : 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON';
+      simulation.updatedAtMs = now;
+      this.metrics.noExit += 1;
+      this._finish(simulation);
+      this.store?.updateSameSlotShadow?.(simulation);
+      changed.push(simulation);
+    }
+    return changed;
+  }
+
+  _finalizeEpisode(state) {
+    if (!state || state.finalized) return [];
+    state.finalized = true;
+    const dump = state.dump;
+    const strictBuys = state.trades.filter((trade) => trade.side === 'BUY'
+      && finite(trade.slot) === finite(dump.slot)
+      && causallyAfter(trade, dump.signalTrade)).sort((left, right) => (
+      finite(left.transactionIndex, Infinity) - finite(right.transactionIndex, Infinity)
+      || finite(left.instructionIndex, Infinity) - finite(right.instructionIndex, Infinity)
+      || finite(left.eventIndex, Infinity) - finite(right.eventIndex, Infinity)
+    ));
+    const created = this._scheduleRank({
+      dump,
+      targetRank: 1,
+      entryReferenceTrade: dump.signalTrade,
+      entryAtMs: dump.detectedAtMs,
+      entryAssumption: 'THEORETICAL_RANK_1_POST_DUMP_STATE',
+      entryReferenceRank: 0,
+    });
+    if (strictBuys[0]) {
+      created.push(...this._scheduleRank({
+        dump,
+        targetRank: 2,
+        entryReferenceTrade: strictBuys[0],
+        entryAtMs: finite(
+          strictBuys[0].receivedAtMs ?? strictBuys[0].timestampMs,
+          dump.detectedAtMs,
+        ),
+        entryAssumption: 'THEORETICAL_RANK_2_AFTER_OBSERVED_RANK_1',
+        entryReferenceRank: 1,
+      }));
+      this._recordCompetitor(dump.episodeId, 1, strictBuys[0], dump.detectedAtMs);
+    }
+    if (strictBuys[1]) {
+      this._recordCompetitor(dump.episodeId, 2, strictBuys[1], dump.detectedAtMs);
+    }
+    for (const simulation of created) {
+      if (simulation.status === 'NO_ENTRY') this.simulations.delete(simulation.shadowId);
+    }
+    this._removeEpisode(dump.episodeId, dump.pool);
+    return created;
+  }
+
+  _scheduleRank({
+    dump, targetRank, entryReferenceTrade, entryAtMs, entryAssumption, entryReferenceRank,
+  }) {
+    if (!this.config.targetRanks.includes(targetRank)) return [];
+    const created = [];
+    for (const positionSol of this.config.positionSizesSol) {
+      const capacity = quoteImmediateRoundTrip(entryReferenceTrade, positionSol, {
+        buySlippageBps: this.config.buySlippageBps,
+        sellSlippageBps: this.config.sellSlippageBps,
+      });
+      const capacityNetProceedsSol = capacity.available
+        ? capacity.proceedsSol - this.txFeeSol * 2 : null;
+      const capacityRoundTripLossPct = capacity.available
+        ? Math.max(0, (1 - capacityNetProceedsSol / positionSol) * 100) : null;
+      let rejectionReason = capacity.available ? null : capacity.reason;
+      if (!rejectionReason && (
+        capacity.entryLiquidityUsagePct > this.config.maxEntryLiquidityUsagePct
+        || capacity.exitLiquidityUsagePct > this.config.maxExitLiquidityUsagePct
+      )) {
+        rejectionReason = 'INSUFFICIENT_ROUND_TRIP_LIQUIDITY';
+        this.metrics.insufficientRoundTripLiquidity += this.config.exitHorizonsMs.length;
+      }
+      if (!rejectionReason
+        && capacityRoundTripLossPct > this.config.maxImmediateRoundTripLossPct) {
+        rejectionReason = 'ROUND_TRIP_COST_TOO_HIGH';
+        this.metrics.roundTripCostTooHigh += this.config.exitHorizonsMs.length;
+      }
+      for (const exitHorizonMs of this.config.exitHorizonsMs) {
+        const shadowId = [
+          dump.episodeId, `R${targetRank}`, positionSol.toFixed(3), `X${exitHorizonMs}`,
+        ].join(':');
+        if (this.simulations.has(shadowId)) continue;
+        const now = this.now();
+        const buy = capacity.buy || {};
+        const simulation = {
+          shadowId,
+          episodeId: dump.episodeId,
+          targetRank,
+          positionSol,
+          exitHorizonMs,
+          quoteModel: this.config.quoteModel,
+          status: rejectionReason ? 'NO_ENTRY' : 'PENDING_EXIT',
+          rejectionReason,
+          infrastructureMode: 'THEORETICAL_ONLY',
+          infrastructureExecutable: false,
+          infrastructureReason: 'POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE',
+          parseBudgetMs: this.config.parseBudgetMs,
+          buildBudgetMs: this.config.buildBudgetMs,
+          signBudgetMs: this.config.signBudgetMs,
+          sendBudgetMs: this.config.sendBudgetMs,
+          responseBudgetMs: this.responseBudgetMs,
+          competitorObservedAtMs: null,
+          competitorReceiveLagMs: null,
+          competitorHeadroomMs: null,
+          entryAssumption,
+          entryReferenceRank,
+          entryAtMs,
+          entrySlot: entryReferenceTrade.slot ?? null,
+          entryReferenceSignature: entryReferenceTrade.signature || null,
+          entryReferenceTransactionIndex: finite(entryReferenceTrade.transactionIndex),
+          entryReferenceInstructionIndex: finite(entryReferenceTrade.instructionIndex),
+          entryReferenceEventIndex: finite(entryReferenceTrade.eventIndex, 0),
+          entryReferenceOrder: {
+            slot: entryReferenceTrade.slot,
+            transactionIndex: entryReferenceTrade.transactionIndex,
+            instructionIndex: entryReferenceTrade.instructionIndex,
+            eventIndex: entryReferenceTrade.eventIndex,
+          },
+          entryPrice: buy.price ?? null,
+          entryMarketPrice: buy.marketPrice ?? null,
+          entryImpactPct: buy.impactPct ?? null,
+          entryTotalFeeBps: buy.totalFeeBps ?? null,
+          entryLiquidityUsagePct: buy.liquidityUsagePct ?? null,
+          entryCapacityRoundTripLossPct: capacityRoundTripLossPct,
+          entryCapacityExitLiquidityUsagePct: capacity.exitLiquidityUsagePct ?? null,
+          tokenUnits: buy.tokenUnits ?? null,
+          entryReserveSource: buy.reserveSource ?? null,
+          entryFeeSol: this.txFeeSol,
+          exitFeeSol: this.txFeeSol,
+          requestedExitAtMs: entryAtMs + exitHorizonMs,
+          exitDeadlineAtMs: entryAtMs + exitHorizonMs + this.config.exitTimeoutMs,
+          postHorizonTrades: 0,
+          dump,
+          createdAtMs: now,
+          updatedAtMs: now,
+        };
+        this.simulations.set(shadowId, simulation);
+        this.metrics.scheduled += 1;
+        if (rejectionReason) {
+          this.metrics.noEntry += 1;
+        } else {
+          const ids = this.simulationsByPool.get(dump.pool) || new Set();
+          ids.add(shadowId);
+          this.simulationsByPool.set(dump.pool, ids);
+          this.metrics.entryFilled += 1;
+          if (targetRank === 1) this.metrics.rank1Entries += 1;
+          if (targetRank === 2) this.metrics.rank2Entries += 1;
+        }
+        this.store?.insertSameSlotShadow?.(simulation);
+        created.push(simulation);
+      }
+    }
+    return created;
+  }
+
+  _recordCompetitor(episodeId, targetRank, trade, dumpDetectedAtMs) {
+    const observedAtMs = finite(trade.receivedAtMs ?? trade.timestampMs, this.now());
+    const receiveLagMs = Math.max(0, observedAtMs - dumpDetectedAtMs);
+    for (const simulation of this.simulations.values()) {
+      if (simulation.episodeId !== episodeId || simulation.targetRank !== targetRank) continue;
+      simulation.competitorObservedAtMs = observedAtMs;
+      simulation.competitorReceiveLagMs = receiveLagMs;
+      simulation.competitorHeadroomMs = receiveLagMs - this.responseBudgetMs;
+      simulation.updatedAtMs = observedAtMs;
+      this.store?.updateSameSlotShadow?.(simulation);
+    }
+  }
+
+  _close(simulation, trade, at, sell) {
+    const totalCostSol = simulation.entryFeeSol + simulation.exitFeeSol;
+    Object.assign(simulation, {
+      status: 'CLOSED',
+      rejectionReason: null,
+      exitAtMs: at,
+      exitSlot: trade.slot ?? null,
+      exitSignature: trade.signature || null,
+      exitQuoteLagMs: Math.max(0, at - simulation.requestedExitAtMs),
+      exitPrice: sell.price,
+      exitMarketPrice: sell.marketPrice,
+      exitImpactPct: sell.impactPct,
+      exitTotalFeeBps: sell.totalFeeBps,
+      exitLiquidityUsagePct: sell.liquidityUsagePct,
+      exitReserveSource: sell.reserveSource,
+      proceedsSol: sell.proceedsSol,
+      totalCostSol,
+      grossReturnPct: (sell.proceedsSol / simulation.positionSol - 1) * 100,
+      netReturnPct: ((sell.proceedsSol - totalCostSol) / simulation.positionSol - 1) * 100,
+      holdMs: at - simulation.entryAtMs,
+      updatedAtMs: at,
+    });
+    this.metrics.exitFilled += 1;
+    this._finish(simulation);
+    this.store?.updateSameSlotShadow?.(simulation);
+  }
+
+  _finish(simulation) {
+    const ids = this.simulationsByPool.get(simulation.dump.pool);
+    if (ids) {
+      ids.delete(simulation.shadowId);
+      if (!ids.size) this.simulationsByPool.delete(simulation.dump.pool);
+    }
+    this.simulations.delete(simulation.shadowId);
+  }
+
+  _removeEpisode(episodeId, pool) {
+    this.episodes.delete(episodeId);
+    const ids = this.episodesByPool.get(pool);
+    if (!ids) return;
+    ids.delete(episodeId);
+    if (!ids.size) this.episodesByPool.delete(pool);
+  }
+
+  isTrackingPool(pool) {
+    return Boolean(pool
+      && (this.episodesByPool.has(pool) || this.simulationsByPool.has(pool)));
+  }
+
+  health() {
+    const active = [...this.simulations.values()]
+      .filter((row) => row.status === 'PENDING_EXIT').length;
+    return {
+      enabled: this.config.enabled,
+      activeSimulations: active,
+      activeEpisodes: this.episodes.size,
+      quoteModel: this.config.quoteModel,
+      responseBudgetMs: this.responseBudgetMs,
+      sendsTransactions: false,
+      ...this.metrics,
+    };
+  }
+}
+
+module.exports = { SameSlotShadowSimulator };

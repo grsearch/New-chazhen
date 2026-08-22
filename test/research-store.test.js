@@ -237,6 +237,63 @@ test('same-slot observations expose strict post-dump chain rank', () => {
   store.close();
 });
 
+test('Same-Slot Shadow results persist separately and report rank cohorts', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,updated_at_ms
+    ) VALUES('shadow-episode','mint','pool',1000,'STRICT','[]','OBSERVING',0,20,1000)
+  `).run();
+  const base = {
+    episodeId: 'shadow-episode', positionSol: 1, exitHorizonMs: 250,
+    quoteModel: 'SAME_SLOT_V1', infrastructureMode: 'THEORETICAL_ONLY',
+    infrastructureExecutable: false,
+    infrastructureReason: 'POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE',
+    parseBudgetMs: 2, buildBudgetMs: 5, signBudgetMs: 1, sendBudgetMs: 15,
+    responseBudgetMs: 23, competitorObservedAtMs: 1020, competitorReceiveLagMs: 20,
+    competitorHeadroomMs: -3, entryAssumption: 'THEORETICAL', entryReferenceRank: 0,
+    entryAtMs: 1000, entrySlot: 10, entryReferenceSignature: 'dump',
+    entryReferenceTransactionIndex: 1, entryReferenceInstructionIndex: 0,
+    entryReferenceEventIndex: 0, entryPrice: 1, entryMarketPrice: 1,
+    entryImpactPct: 0, entryTotalFeeBps: 25, entryLiquidityUsagePct: 1,
+    entryCapacityRoundTripLossPct: 2, entryCapacityExitLiquidityUsagePct: 1,
+    tokenUnits: 1, entryReserveSource: 'TEST', entryFeeSol: 0.001, exitFeeSol: 0.001,
+    requestedExitAtMs: 1250, exitDeadlineAtMs: 3250, postHorizonTrades: 1,
+    createdAtMs: 1000, updatedAtMs: 1300,
+  };
+  store.insertSameSlotShadow({
+    ...base, shadowId: 'rank-1', targetRank: 1, status: 'CLOSED',
+    exitAtMs: 1300, exitSlot: 11, exitSignature: 'exit', exitQuoteLagMs: 50,
+    exitPrice: 1.1, exitMarketPrice: 1.1, exitImpactPct: 0, exitTotalFeeBps: 25,
+    exitLiquidityUsagePct: 1, exitReserveSource: 'TEST', proceedsSol: 1.1,
+    totalCostSol: 0.002, grossReturnPct: 10, netReturnPct: 9.8, holdMs: 300,
+  });
+  store.insertSameSlotShadow({
+    ...base, shadowId: 'rank-2', targetRank: 2, entryReferenceRank: 1,
+    status: 'NO_EXIT', rejectionReason: 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON',
+  });
+  store.flush();
+
+  const summary = store.summary();
+  assert.equal(summary.sameSlotShadow.scheduled, 2);
+  assert.equal(summary.sameSlotShadow.entryFilled, 2);
+  assert.equal(summary.sameSlotShadow.exitFilled, 1);
+  assert.equal(summary.sameSlotShadow.noExit, 1);
+  assert.equal(summary.sameSlotShadow.winRatePct, 100);
+  assert.equal(summary.sameSlotShadow.infrastructureExecutable, false);
+  assert.deepEqual(
+    summary.sameSlotShadowCohorts.map((row) => row.targetRank).sort(),
+    [1, 2],
+  );
+  const stored = store.db.prepare(`
+    SELECT infrastructure_executable,competitor_headroom_ms
+    FROM same_slot_shadow_simulations WHERE shadow_id='rank-1'
+  `).get();
+  assert.deepEqual(stored, { infrastructure_executable: 0, competitor_headroom_ms: -3 });
+  store.close();
+});
+
 test('legacy price parses and drops over 40 percent stay out of strategy statistics', () => {
   const store = new ResearchStore({
     dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
