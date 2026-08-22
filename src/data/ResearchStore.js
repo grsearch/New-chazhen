@@ -54,6 +54,35 @@ function returnStats(rows) {
   };
 }
 
+function eventConcentrationStats(rows) {
+  const byEpisode = new Map();
+  for (const row of rows) {
+    if (!row?.episodeId) continue;
+    const result = number(row.net_return_pct ?? row.netReturnPct);
+    if (!Number.isFinite(result)) continue;
+    const state = byEpisode.get(row.episodeId) || { hasWin: false, grossWin: 0 };
+    if (result > 0) {
+      state.hasWin = true;
+      state.grossWin += result;
+    }
+    byEpisode.set(row.episodeId, state);
+  }
+  const grossWins = [...byEpisode.values()].map((row) => row.grossWin)
+    .filter((result) => result > 0).sort((left, right) => right - left);
+  const totalGrossWins = grossWins.reduce((sum, result) => sum + result, 0);
+  const resolvedEpisodes = byEpisode.size;
+  const episodesWithAnyWin = [...byEpisode.values()].filter((row) => row.hasWin).length;
+  return {
+    resolvedEpisodes,
+    episodesWithAnyWin,
+    episodeAnyWinRatePct: resolvedEpisodes ? episodesWithAnyWin / resolvedEpisodes * 100 : null,
+    largestWinnerEventContributionPct: totalGrossWins > 0
+      ? grossWins[0] / totalGrossWins * 100 : null,
+    top3WinnerEventsContributionPct: totalGrossWins > 0
+      ? grossWins.slice(0, 3).reduce((sum, result) => sum + result, 0) / totalGrossWins * 100 : null,
+  };
+}
+
 function compareCohortPerformance(left, right) {
   const metrics = ['winRatePct', 'averageNetReturnPct', 'resolved', 'scheduled'];
   for (const metric of metrics) {
@@ -64,27 +93,52 @@ function compareCohortPerformance(left, right) {
     if (rightValue == null) return -1;
     if (leftValue !== rightValue) return rightValue - leftValue;
   }
-  return [left.recoveryProfileId, left.entryVariantId, left.positionSol, left.exitProfileId]
+  return [left.quoteModel, left.recoveryProfileId, left.entryVariantId, left.positionSol, left.exitProfileId]
     .join(':').localeCompare(
-      [right.recoveryProfileId, right.entryVariantId, right.positionSol, right.exitProfileId]
+      [right.quoteModel, right.recoveryProfileId, right.entryVariantId, right.positionSol, right.exitProfileId]
         .join(':'),
     );
 }
 
 class ResearchStore {
   constructor(config) {
-    this.config = config;
-    if (config.dbPath !== ':memory:') fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
-    this.db = new Database(config.dbPath);
+    this.config = {
+      storeTradeRawJson: false,
+      tradeRetentionMs: 30 * 86_400_000,
+      slotSummaryRetentionMs: 30 * 86_400_000,
+      maintenanceIntervalMs: 600_000,
+      maintenanceBatchMax: 10_000,
+      ...config,
+    };
+    if (this.config.dbPath !== ':memory:') {
+      fs.mkdirSync(path.dirname(this.config.dbPath), { recursive: true });
+    }
+    this.db = new Database(this.config.dbPath);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('synchronous = NORMAL');
     this.db.pragma('foreign_keys = ON');
     this.pending = [];
-    this.metrics = { queued: 0, flushed: 0, flushes: 0, errors: 0 };
+    this.metrics = {
+      queued: 0,
+      flushed: 0,
+      flushes: 0,
+      errors: 0,
+      maintenanceRuns: 0,
+      maintenanceErrors: 0,
+      prunedTrades: 0,
+      prunedSlotSummaries: 0,
+    };
     this._initSchema();
     this._prepare();
-    this.timer = setInterval(() => this.flush(), config.flushMs);
+    this.timer = setInterval(() => this.flush(), this.config.flushMs);
     if (this.timer.unref) this.timer.unref();
+    this.maintenanceTimer = setInterval(
+      () => {
+        try { this.maintain(); } catch (_) { /* surfaced by health metrics */ }
+      },
+      this.config.maintenanceIntervalMs,
+    );
+    if (this.maintenanceTimer.unref) this.maintenanceTimer.unref();
   }
 
   _initSchema() {
@@ -93,7 +147,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '3')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '5')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -290,6 +344,8 @@ class ResearchStore {
         entry_protocol_fee_bps REAL,
         entry_total_fee_bps REAL,
         entry_liquidity_usage_pct REAL,
+        entry_capacity_round_trip_loss_pct REAL,
+        entry_capacity_exit_liquidity_usage_pct REAL,
         token_units REAL,
         entry_reserve_source TEXT,
         entry_fee_sol REAL,
@@ -329,6 +385,11 @@ class ResearchStore {
       CREATE INDEX IF NOT EXISTS idx_sim_cohort ON simulations(
         recovery_profile_id, entry_variant_id, position_sol, exit_profile_id
       );
+      CREATE INDEX IF NOT EXISTS idx_sim_model_cohort ON simulations(
+        quote_model, recovery_profile_id, entry_variant_id, position_sol, exit_profile_id
+      );
+      CREATE INDEX IF NOT EXISTS idx_sim_confirmation ON simulations(confirmation_id);
+      CREATE INDEX IF NOT EXISTS idx_sim_episode_status ON simulations(episode_id, status);
 
       CREATE TABLE IF NOT EXISTS toxic_wallets (
         wallet TEXT PRIMARY KEY,
@@ -340,6 +401,8 @@ class ResearchStore {
     `);
     this._ensureColumn('simulations', 'entry_total_fee_bps', 'REAL');
     this._ensureColumn('simulations', 'exit_total_fee_bps', 'REAL');
+    this._ensureColumn('simulations', 'entry_capacity_round_trip_loss_pct', 'REAL');
+    this._ensureColumn('simulations', 'entry_capacity_exit_liquidity_usage_pct', 'REAL');
   }
 
   _ensureColumn(table, column, definition) {
@@ -458,6 +521,7 @@ class ResearchStore {
           entry_deadline_at_ms,entry_at_ms,entry_slot,entry_signature,entry_quote_lag_ms,
           actual_entry_delay_ms,entry_price,entry_market_price,entry_impact_pct,
           entry_protocol_fee_bps,entry_total_fee_bps,entry_liquidity_usage_pct,
+          entry_capacity_round_trip_loss_pct,entry_capacity_exit_liquidity_usage_pct,
           token_units,entry_reserve_source,
           entry_fee_sol,exit_fee_sol,failed_transaction_fee_sol,max_exit_at_ms,
           exit_triggered_at_ms,exit_target_at_ms,requested_exit_at_ms,exit_deadline_at_ms,
@@ -473,7 +537,9 @@ class ResearchStore {
           @rejectionReason,@confirmedAtMs,@confirmationSlot,@requestedEntryAtMs,
           @entryDeadlineAtMs,@entryAtMs,@entrySlot,@entrySignature,@entryQuoteLagMs,
           @actualEntryDelayMs,@entryPrice,@entryMarketPrice,@entryImpactPct,
-          @entryProtocolFeeBps,@entryTotalFeeBps,@entryLiquidityUsagePct,@tokenUnits,@entryReserveSource,
+          @entryProtocolFeeBps,@entryTotalFeeBps,@entryLiquidityUsagePct,
+          @entryCapacityRoundTripLossPct,@entryCapacityExitLiquidityUsagePct,
+          @tokenUnits,@entryReserveSource,
           @entryFeeSol,@exitFeeSol,@failedTransactionFeeSol,@maxExitAtMs,
           @exitTriggeredAtMs,@exitTargetAtMs,@requestedExitAtMs,@exitDeadlineAtMs,
           @exitAtMs,@exitSlot,@exitSignature,@exitQuoteLagMs,@exitHorizonLagMs,
@@ -491,6 +557,8 @@ class ResearchStore {
           entry_protocol_fee_bps=excluded.entry_protocol_fee_bps,
           entry_total_fee_bps=excluded.entry_total_fee_bps,
           entry_liquidity_usage_pct=excluded.entry_liquidity_usage_pct,
+          entry_capacity_round_trip_loss_pct=excluded.entry_capacity_round_trip_loss_pct,
+          entry_capacity_exit_liquidity_usage_pct=excluded.entry_capacity_exit_liquidity_usage_pct,
           token_units=excluded.token_units,entry_reserve_source=excluded.entry_reserve_source,
           max_exit_at_ms=excluded.max_exit_at_ms,exit_triggered_at_ms=excluded.exit_triggered_at_ms,
           exit_target_at_ms=excluded.exit_target_at_ms,requested_exit_at_ms=excluded.requested_exit_at_ms,
@@ -515,6 +583,16 @@ class ResearchStore {
         ON CONFLICT(wallet) DO UPDATE SET incidents=excluded.incidents,
           last_reason=excluded.last_reason,last_seen_at_ms=excluded.last_seen_at_ms,
           last_episode_id=excluded.last_episode_id
+      `),
+      pruneTrades: this.db.prepare(`
+        DELETE FROM trades WHERE id IN (
+          SELECT id FROM trades WHERE received_at_ms < ? LIMIT ?
+        )
+      `),
+      pruneSlotSummaries: this.db.prepare(`
+        DELETE FROM slot_summaries WHERE slot IN (
+          SELECT slot FROM slot_summaries WHERE last_received_at_ms < ? LIMIT ?
+        )
       `),
     };
     this.flushTransaction = this.db.transaction((operations) => {
@@ -549,7 +627,8 @@ class ResearchStore {
       lpFeeBps: number(trade.lpFeeBasisPoints), protocolFeeBps: number(trade.protocolFeeBasisPoints),
       creatorFeeBps: number(trade.coinCreatorFeeBasisPoints),
       buybackFeeBps: number(trade.buybackFeeBasisPoints), totalFeeBps: number(trade.totalFeeBps),
-      parseVersion: value(trade.parseVersion), rawJson: json(trade),
+      parseVersion: value(trade.parseVersion),
+      rawJson: this.config.storeTradeRawJson ? json(trade) : null,
     });
   }
 
@@ -640,7 +719,8 @@ class ResearchStore {
       'rejectionReason','confirmedAtMs','confirmationSlot','requestedEntryAtMs','entryDeadlineAtMs',
       'entryAtMs','entrySlot','entrySignature','entryQuoteLagMs','actualEntryDelayMs','entryPrice',
       'entryMarketPrice','entryImpactPct','entryProtocolFeeBps','entryTotalFeeBps',
-      'entryLiquidityUsagePct','tokenUnits',
+      'entryLiquidityUsagePct','entryCapacityRoundTripLossPct',
+      'entryCapacityExitLiquidityUsagePct','tokenUnits',
       'entryReserveSource','entryFeeSol','exitFeeSol','failedTransactionFeeSol','maxExitAtMs',
       'exitTriggeredAtMs','exitTargetAtMs','requestedExitAtMs','exitDeadlineAtMs','exitAtMs',
       'exitSlot','exitSignature','exitQuoteLagMs','exitHorizonLagMs','exitReason','exitPrice',
@@ -678,6 +758,28 @@ class ResearchStore {
     } catch (error) {
       this.metrics.errors += 1;
       this.pending.unshift(...operations);
+      throw error;
+    }
+  }
+
+  maintain(now = Date.now()) {
+    try {
+      this.flush();
+      const batchMax = this.config.maintenanceBatchMax;
+      const prunedTrades = this.statements.pruneTrades.run(
+        now - this.config.tradeRetentionMs, batchMax,
+      ).changes;
+      const prunedSlotSummaries = this.statements.pruneSlotSummaries.run(
+        now - this.config.slotSummaryRetentionMs, batchMax,
+      ).changes;
+      this.db.pragma('wal_checkpoint(PASSIVE)');
+      this.metrics.maintenanceRuns += 1;
+      this.metrics.prunedTrades += prunedTrades;
+      this.metrics.prunedSlotSummaries += prunedSlotSummaries;
+      return { prunedTrades, prunedSlotSummaries };
+    } catch (error) {
+      this.metrics.maintenanceErrors += 1;
+      this.metrics.errors += 1;
       throw error;
     }
   }
@@ -727,6 +829,19 @@ class ResearchStore {
         COUNT(*) total_confirmations
       FROM confirmations
     `).get();
+    const confirmationCoverage = this.db.prepare(`
+      WITH coverage AS (
+        SELECT confirmation_id,episode_id,
+          EXISTS(SELECT 1 FROM simulations s
+            WHERE s.confirmation_id=confirmations.confirmation_id) has_simulation
+        FROM confirmations
+      )
+      SELECT COUNT(*) total,
+        SUM(has_simulation) with_simulation,
+        SUM(CASE WHEN has_simulation=0 THEN 1 ELSE 0 END) without_simulation,
+        COUNT(DISTINCT CASE WHEN has_simulation=1 THEN episode_id END) simulated_episodes
+      FROM coverage
+    `).get();
     const sameSlot = this.db.prepare(`
       SELECT COUNT(*) observations,
         SUM(CASE WHEN classification='STRICT_AFTER_DUMP' THEN 1 ELSE 0 END) strict_after_dump,
@@ -744,10 +859,24 @@ class ResearchStore {
         SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
         SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) exit_filled,
         SUM(CASE WHEN status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry,
-        SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit
+        SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='RECOVERY_INVALIDATED_BEFORE_ENTRY' THEN 1 ELSE 0 END)
+          invalidated_before_entry,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='INSUFFICIENT_ROUND_TRIP_LIQUIDITY' THEN 1 ELSE 0 END)
+          insufficient_round_trip_liquidity,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='ROUND_TRIP_COST_TOO_HIGH' THEN 1 ELSE 0 END)
+          round_trip_cost_too_high,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='NO_CAUSAL_ENTRY_QUOTE' THEN 1 ELSE 0 END)
+          no_causal_entry_quote
       FROM simulations
     `).get();
-    const returns = this.db.prepare(`SELECT net_return_pct FROM simulations WHERE status='CLOSED'`).all();
+    const returns = this.db.prepare(`
+      SELECT episode_id episodeId,net_return_pct FROM simulations WHERE status='CLOSED'
+    `).all();
     const eligibleDumps = Math.max(0, dump.independent - (dump.toxic_rejected || 0));
     return {
       generatedAtMs: Date.now(),
@@ -793,6 +922,17 @@ class ResearchStore {
         exitFilled: simulationCounts.exit_filled || 0,
         noEntry: simulationCounts.no_entry || 0,
         noExit: simulationCounts.no_exit || 0,
+        invalidatedBeforeEntry: simulationCounts.invalidated_before_entry || 0,
+        insufficientRoundTripLiquidity:
+          simulationCounts.insufficient_round_trip_liquidity || 0,
+        roundTripCostTooHigh: simulationCounts.round_trip_cost_too_high || 0,
+        noCausalEntryQuote: simulationCounts.no_causal_entry_quote || 0,
+        totalConfirmations: confirmationCoverage.total || 0,
+        confirmationsWithSimulation: confirmationCoverage.with_simulation || 0,
+        confirmationsWithoutSimulation: confirmationCoverage.without_simulation || 0,
+        simulatedEpisodes: confirmationCoverage.simulated_episodes || 0,
+        confirmationCoveragePct: confirmationCoverage.total
+          ? confirmationCoverage.with_simulation / confirmationCoverage.total * 100 : null,
         entryFillRatePct: simulationCounts.scheduled
           ? simulationCounts.entry_filled / simulationCounts.scheduled * 100 : null,
         exitFillRatePct: simulationCounts.entry_filled
@@ -800,6 +940,7 @@ class ResearchStore {
         noExitRatePct: simulationCounts.entry_filled
           ? simulationCounts.no_exit / simulationCounts.entry_filled * 100 : null,
         ...returnStats(returns),
+        ...eventConcentrationStats(returns),
       },
       cohorts: this.cohorts(),
       store: this.health(),
@@ -808,7 +949,7 @@ class ResearchStore {
 
   cohorts() {
     const groups = this.db.prepare(`
-      SELECT recovery_profile_id,entry_variant_id,position_sol,exit_profile_id,
+      SELECT quote_model,recovery_profile_id,entry_variant_id,position_sol,exit_profile_id,
         COUNT(*) scheduled,
         SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
         SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) exit_filled,
@@ -817,21 +958,36 @@ class ResearchStore {
           THEN 1 ELSE 0 END) no_exit_quote,
         SUM(CASE WHEN status='NO_EXIT'
           AND rejection_reason='NO_TRADE_AT_OR_AFTER_EXIT_HORIZON'
-          THEN 1 ELSE 0 END) no_trade_after_horizon
+          THEN 1 ELSE 0 END) no_trade_after_horizon,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='RECOVERY_INVALIDATED_BEFORE_ENTRY'
+          THEN 1 ELSE 0 END) invalidated_before_entry,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='INSUFFICIENT_ROUND_TRIP_LIQUIDITY'
+          THEN 1 ELSE 0 END) insufficient_round_trip_liquidity,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='ROUND_TRIP_COST_TOO_HIGH'
+          THEN 1 ELSE 0 END) round_trip_cost_too_high,
+        SUM(CASE WHEN status='NO_ENTRY'
+          AND rejection_reason='NO_CAUSAL_ENTRY_QUOTE'
+          THEN 1 ELSE 0 END) no_causal_entry_quote
       FROM simulations
-      GROUP BY recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
-      ORDER BY recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
+      GROUP BY quote_model,recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
+      ORDER BY quote_model,recovery_profile_id,entry_variant_id,position_sol,exit_profile_id
     `).all();
     const returns = this.db.prepare(`
-      SELECT recovery_profile_id,entry_variant_id,position_sol,exit_profile_id,net_return_pct
+      SELECT episode_id episodeId,quote_model,recovery_profile_id,entry_variant_id,position_sol,
+        exit_profile_id,net_return_pct
       FROM simulations WHERE status='CLOSED'
     `).all();
     return groups.map((group) => {
       const rows = returns.filter((row) => row.recovery_profile_id === group.recovery_profile_id
+        && row.quote_model === group.quote_model
         && row.entry_variant_id === group.entry_variant_id
         && row.position_sol === group.position_sol
         && row.exit_profile_id === group.exit_profile_id);
       return {
+        quoteModel: group.quote_model,
         recoveryProfileId: group.recovery_profile_id,
         entryVariantId: group.entry_variant_id,
         positionSol: group.position_sol,
@@ -844,7 +1000,12 @@ class ResearchStore {
         noTradeAfterHorizon: group.no_trade_after_horizon,
         noExitOther: Math.max(0,
           group.no_exit - group.no_exit_quote - group.no_trade_after_horizon),
+        invalidatedBeforeEntry: group.invalidated_before_entry || 0,
+        insufficientRoundTripLiquidity: group.insufficient_round_trip_liquidity || 0,
+        roundTripCostTooHigh: group.round_trip_cost_too_high || 0,
+        noCausalEntryQuote: group.no_causal_entry_quote || 0,
         ...returnStats(rows),
+        ...eventConcentrationStats(rows),
       };
     }).sort(compareCohortPerformance);
   }
@@ -905,18 +1066,51 @@ class ResearchStore {
   }
 
   health() {
+    const disk = this._diskHealth();
     return {
       dbPath: this.config.dbPath,
+      storageMode: 'DUMP_EVENT_WINDOWS',
+      storesTradeRawJson: this.config.storeTradeRawJson,
+      tradeRetentionDays: this.config.tradeRetentionMs / 86_400_000,
       pendingWrites: this.pending.length,
+      ...disk,
       ...this.metrics,
     };
   }
 
+  _diskHealth() {
+    if (this.config.dbPath === ':memory:') {
+      return { dbFileBytes: null, diskFreeBytes: null, diskTotalBytes: null, diskFreePct: null };
+    }
+    const directory = path.dirname(this.config.dbPath);
+    const sizeOf = (file) => {
+      try { return fs.statSync(file).size; } catch (_) { return 0; }
+    };
+    const dbFileBytes = sizeOf(this.config.dbPath)
+      + sizeOf(`${this.config.dbPath}-wal`) + sizeOf(`${this.config.dbPath}-shm`);
+    try {
+      const stats = fs.statfsSync(directory);
+      const diskFreeBytes = Number(stats.bavail) * Number(stats.bsize);
+      const diskTotalBytes = Number(stats.blocks) * Number(stats.bsize);
+      return {
+        dbFileBytes,
+        diskFreeBytes,
+        diskTotalBytes,
+        diskFreePct: diskTotalBytes > 0 ? diskFreeBytes / diskTotalBytes * 100 : null,
+      };
+    } catch (_) {
+      return { dbFileBytes, diskFreeBytes: null, diskTotalBytes: null, diskFreePct: null };
+    }
+  }
+
   close() {
     clearInterval(this.timer);
+    clearInterval(this.maintenanceTimer);
     this.flush();
     this.db.close();
   }
 }
 
-module.exports = { ResearchStore, compareCohortPerformance, returnStats };
+module.exports = {
+  ResearchStore, compareCohortPerformance, returnStats, eventConcentrationStats,
+};

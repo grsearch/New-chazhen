@@ -4,6 +4,41 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ResearchStore } = require('../src/data/ResearchStore');
 
+function storedTrade(signature, receivedAtMs) {
+  return {
+    type: 'ammTrade', signature, eventIndex: 0, receivedAtMs,
+    orderingConfidence: 'STRICT', side: 'BUY', market: 'PUMP_AMM',
+    mint: 'mint', pool: 'pool', solAmount: 1, tokenAmount: 10,
+  };
+}
+
+test('trade rows omit duplicate raw JSON and old event windows are pruned in bounded batches', () => {
+  const now = 100_000;
+  const store = new ResearchStore({
+    dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
+    storeTradeRawJson: false, tradeRetentionMs: 1_000,
+    slotSummaryRetentionMs: 1_000, maintenanceIntervalMs: 60_000,
+    maintenanceBatchMax: 1,
+  });
+  store.recordTrade(storedTrade('old-1', now - 2_000));
+  store.recordTrade(storedTrade('old-2', now - 1_500));
+  store.recordTrade(storedTrade('current', now));
+  store.recordSlotSummary({
+    slot: 1, firstReceivedAtMs: now - 2_000, lastReceivedAtMs: now - 2_000,
+    eventCount: 1, transactionCount: 1, transactionIndexCoveragePct: 100,
+    strictOrderingAvailable: true,
+  });
+  store.flush();
+
+  const raw = store.db.prepare('SELECT raw_json FROM trades WHERE signature = ?').get('current');
+  assert.equal(raw.raw_json, null);
+  assert.deepEqual(store.maintain(now), { prunedTrades: 1, prunedSlotSummaries: 1 });
+  assert.equal(store.db.prepare('SELECT COUNT(*) count FROM trades').get().count, 2);
+  assert.equal(store.health().storageMode, 'DUMP_EVENT_WINDOWS');
+  assert.equal(store.health().prunedTrades, 1);
+  store.close();
+});
+
 test('research store batches events and reports NO_EXIT independently', () => {
   const now = 1_800_000_000_000;
   const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
@@ -37,6 +72,11 @@ test('research store batches events and reports NO_EXIT independently', () => {
     confirmedAtMs: now + 100, slot: 101, transactionIndex: 1, instructionIndex: 0,
     eventIndex: 0, signature: 'confirm', orderingConfidence: 'STRICT', snapshot,
   });
+  store.insertConfirmation({
+    confirmationId: 'episode:R2', episodeId: 'episode', profileId: 'R2',
+    confirmedAtMs: now + 110, slot: 101, transactionIndex: 2, instructionIndex: 0,
+    eventIndex: 0, signature: 'confirm-r2', orderingConfidence: 'STRICT', snapshot,
+  });
   store.insertSameSlotObservation({
     observationId: 'episode:same-slot:0', episodeId: 'episode', mint: 'mint', pool: 'pool',
     observedAtMs: now + 50, slot: 100, dumpTransactionIndex: 1, buyTransactionIndex: 2,
@@ -56,6 +96,7 @@ test('research store batches events and reports NO_EXIT independently', () => {
   store.insertSimulation({
     ...baseSimulation, simulationId: 'closed', status: 'CLOSED', entryAtMs: now + 400,
     exitAtMs: now + 1_500, entryPrice: 1, exitPrice: 1.1, netReturnPct: 10,
+    entryCapacityRoundTripLossPct: 2.5, entryCapacityExitLiquidityUsagePct: 1.2,
   });
   store.insertSimulation({
     ...baseSimulation, simulationId: 'no-exit', status: 'NO_EXIT', entryAtMs: now + 400,
@@ -76,10 +117,25 @@ test('research store batches events and reports NO_EXIT independently', () => {
   assert.equal(summary.execution.exitFilled, 1);
   assert.equal(summary.execution.noExit, 2);
   assert.equal(summary.execution.resolved, 1, 'NO_EXIT must not be converted into an invented return');
+  assert.equal(summary.execution.resolvedEpisodes, 1);
+  assert.equal(summary.execution.episodesWithAnyWin, 1);
+  assert.equal(summary.execution.largestWinnerEventContributionPct, 100);
+  assert.equal(summary.execution.totalConfirmations, 2);
+  assert.equal(summary.execution.confirmationsWithSimulation, 1);
+  assert.equal(summary.execution.confirmationsWithoutSimulation, 1);
+  assert.equal(summary.execution.confirmationCoveragePct, 50);
+  assert.equal(summary.cohorts[0].quoteModel, 'TEST');
   assert.equal(summary.cohorts[0].resolved, 1);
+  assert.equal(summary.cohorts[0].resolvedEpisodes, 1);
   assert.equal(summary.cohorts[0].noExitQuote, 1);
   assert.equal(summary.cohorts[0].noTradeAfterHorizon, 1);
   assert.equal(summary.cohorts[0].noExitOther, 0);
+  const storedCapacity = store.db.prepare(`
+    SELECT entry_capacity_round_trip_loss_pct loss,
+      entry_capacity_exit_liquidity_usage_pct exit_usage
+    FROM simulations WHERE simulation_id='closed'
+  `).get();
+  assert.deepEqual(storedCapacity, { loss: 2.5, exit_usage: 1.2 });
   store.close();
 });
 
@@ -187,7 +243,7 @@ test('obsolete small-position simulations can be removed without deleting curren
   store.close();
 });
 
-test('invalid V1 fee-model simulations can be removed without deleting V2 research data', () => {
+test('invalid V1/V2 simulations can be removed without deleting V3 research data', () => {
   const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
   store.db.prepare(`
     INSERT INTO dump_events(
@@ -215,11 +271,17 @@ test('invalid V1 fee-model simulations can be removed without deleting V2 resear
     'v2', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
     'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2', 'NO_ENTRY', 1, 1, 1,
   );
+  insert.run(
+    'v3', 'confirmation', 'episode', 'R1', 'E100', 'DELAY', 100, 'H1', 1,
+    'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V3', 'NO_ENTRY', 1, 1, 1,
+  );
 
-  const removed = store.deleteSimulationsByQuoteModels(['PUMPSWAP_CPMM_EVENT_FEES_V1']);
+  const removed = store.deleteSimulationsByQuoteModels([
+    'PUMPSWAP_CPMM_EVENT_FEES_V1', 'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
+  ]);
   const remaining = store.db.prepare('SELECT simulation_id FROM simulations').all();
 
-  assert.equal(removed, 1);
-  assert.deepEqual(remaining, [{ simulation_id: 'v2' }]);
+  assert.equal(removed, 2);
+  assert.deepEqual(remaining, [{ simulation_id: 'v3' }]);
   store.close();
 });

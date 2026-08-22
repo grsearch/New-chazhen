@@ -28,6 +28,7 @@ class PostDumpRecoveryEngine {
       confirmations: 0,
       blockedSameSlotConfirmations: 0,
       sameSlotObservations: 0,
+      researchTradeWrites: 0,
       errors: 0,
       lastEventAtMs: null,
     };
@@ -43,7 +44,15 @@ class PostDumpRecoveryEngine {
     }
     if (event?.type !== 'ammTrade') return { dump: null, confirmations: [] };
     this.metrics.trades += 1;
-    this.store.recordTrade(event);
+
+    // Persist only causal research windows. DumpDetector still keeps the short
+    // pre-window in memory, so unrelated PumpSwap traffic never reaches SQLite.
+    const activeResearchWindow = this.recovery.isObservingPool(event.pool)
+      || this.execution.isTrackingPool(event.pool);
+    if (activeResearchWindow) {
+      this.store.recordTrade(event);
+      this.metrics.researchTradeWrites += 1;
+    }
 
     const dump = this.dumpDetector.observeTrade(event);
     const recoveryResult = this.recovery.observeTrade(event);
@@ -69,6 +78,10 @@ class PostDumpRecoveryEngine {
     }
 
     if (dump) {
+      const preWindowStartMs = dump.detectedAtMs - this.config.dump.preWindowMs;
+      const researchTrades = this.dumpDetector.recentTrades(dump.pool, preWindowStartMs);
+      for (const researchTrade of researchTrades) this.store.recordTrade(researchTrade);
+      this.metrics.researchTradeWrites += researchTrades.length;
       const toxic = this.toxicFilter.evaluateDump(dump);
       this.store.insertDump(dump, toxic);
       const initial = this.recovery.startEpisode(dump, toxic);

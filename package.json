@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "replay": "node scripts/replay-jsonl.js",
+    "compact:event-windows": "node scripts/compact-event-window-db.js",
     "export:window": "node scripts/export-research-window.js",
     "test": "node --test --test-isolation=none",
     "check": "node scripts/check.js"

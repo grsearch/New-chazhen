@@ -1,6 +1,8 @@
 'use strict';
 
-const { quoteBuy, quoteSell, transactionFeeSol } = require('./AmmQuote');
+const {
+  quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
+} = require('./AmmQuote');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -23,6 +25,9 @@ class ExecutionSimulator {
       exitFilled: 0,
       noExit: 0,
       blockedSameSlot: 0,
+      invalidatedBeforeEntry: 0,
+      insufficientRoundTripLiquidity: 0,
+      roundTripCostTooHigh: 0,
     };
   }
 
@@ -92,12 +97,46 @@ class ExecutionSimulator {
     for (const simulationId of [...ids]) {
       const simulation = this.simulations.get(simulationId);
       if (!simulation || simulation.dump.mint !== trade.mint) continue;
+      const recovery = updatesByEpisode.get(simulation.episodeId);
       if (simulation.status === 'PENDING_ENTRY') {
+        if (recovery?.secondDump || recovery?.status === 'SECOND_DUMP') {
+          this._rejectEntry(simulation, 'RECOVERY_INVALIDATED_BEFORE_ENTRY', at);
+          this.metrics.invalidatedBeforeEntry += 1;
+          changed.push(simulation);
+          continue;
+        }
         if (!this._entryEligible(simulation, trade, at)) continue;
-        const buy = quoteBuy(trade, simulation.positionSol, {
-          slippageBps: this.config.buySlippageBps,
+        const capacity = quoteImmediateRoundTrip(trade, simulation.positionSol, {
+          buySlippageBps: this.config.buySlippageBps,
+          sellSlippageBps: this.config.sellSlippageBps,
         });
-        if (!buy.available) continue;
+        if (!capacity.available) continue;
+        const capacityNetProceedsSol = capacity.proceedsSol - this.txFeeSol * 2;
+        const capacityRoundTripLossPct = Math.max(
+          0,
+          (1 - capacityNetProceedsSol / simulation.positionSol) * 100,
+        );
+        Object.assign(simulation, {
+          entryCapacityRoundTripLossPct: capacityRoundTripLossPct,
+          entryCapacityExitLiquidityUsagePct: capacity.exitLiquidityUsagePct,
+        });
+        const maxEntryUsage = finite(this.config.maxEntryLiquidityUsagePct, Infinity);
+        const maxExitUsage = finite(this.config.maxExitLiquidityUsagePct, Infinity);
+        if (capacity.entryLiquidityUsagePct > maxEntryUsage
+          || capacity.exitLiquidityUsagePct > maxExitUsage) {
+          this._rejectEntry(simulation, 'INSUFFICIENT_ROUND_TRIP_LIQUIDITY', at);
+          this.metrics.insufficientRoundTripLiquidity += 1;
+          changed.push(simulation);
+          continue;
+        }
+        const maxRoundTripLoss = finite(this.config.maxImmediateRoundTripLossPct, Infinity);
+        if (capacityRoundTripLossPct > maxRoundTripLoss) {
+          this._rejectEntry(simulation, 'ROUND_TRIP_COST_TOO_HIGH', at);
+          this.metrics.roundTripCostTooHigh += 1;
+          changed.push(simulation);
+          continue;
+        }
+        const buy = capacity.buy;
         Object.assign(simulation, {
           status: 'OPEN',
           entryAtMs: at,
@@ -146,7 +185,6 @@ class ExecutionSimulator {
       simulation.lastExecutableNetPct = returns.netReturnPct;
       simulation.lastExecutableQuoteAtMs = at;
       simulation.updatedAtMs = at;
-      const recovery = updatesByEpisode.get(simulation.episodeId);
       const reason = this._exitReason(simulation, recovery, returns.netReturnPct, at);
       if (reason) this._triggerExit(simulation, reason, at);
       this.store?.updateSimulation?.(simulation);
@@ -271,6 +309,18 @@ class ExecutionSimulator {
     if (!ids) return;
     ids.delete(simulation.simulationId);
     if (!ids.size) this.byPool.delete(simulation.dump.pool);
+  }
+
+  _rejectEntry(simulation, reason, at) {
+    simulation.status = 'NO_ENTRY';
+    simulation.rejectionReason = reason;
+    simulation.updatedAtMs = at;
+    this.metrics.noEntry += 1;
+    this._finish(simulation);
+  }
+
+  isTrackingPool(pool) {
+    return Boolean(pool && this.byPool.has(pool));
   }
 
   health() {

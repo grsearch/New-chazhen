@@ -39,6 +39,10 @@
     .pager button:disabled { opacity:.35; cursor:not-allowed; }
     .pager-info { min-width:180px; text-align:center; font-variant-numeric:tabular-nums; }
     .empty { color:var(--muted); text-align:center!important; padding:28px!important; }
+    .notice { color:var(--muted); }
+    .notice strong { color:var(--text); }
+    .warning { color:#ffbf69; }
+    .sample { margin-left:7px; font-size:11px; color:#ffbf69; }
     @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} .panel-head{align-items:start;flex-direction:column}.pager{justify-content:center;flex-wrap:wrap}.pager-info{order:-1;width:100%} }
   </style>
 </head>
@@ -49,6 +53,7 @@
     <div class="badge" id="status">读取中</div>
   </header>
   <section class="cards" id="cards"></section>
+  <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
   <section class="panel">
     <div class="panel-head"><h2>Same-Slot 基础设施观察（不计入策略收益）</h2><span class="sort-note">按观察时间从新到旧</span></div>
     <div class="table-wrap"><table id="same-slot"></table></div><div class="pager" id="same-slot-pager"></div>
@@ -95,6 +100,14 @@ const noExitReasons=r=>{
   if(metric(r.noExitOther)>0)reasons.push(`其他 ${r.noExitOther}`);
   return reasons.length?reasons.join(' · '):'—';
 };
+const noEntryReasons=r=>{
+  const reasons=[];
+  if(metric(r.noCausalEntryQuote)>0)reasons.push(`无入场报价 ${r.noCausalEntryQuote}`);
+  if(metric(r.invalidatedBeforeEntry)>0)reasons.push(`恢复失效 ${r.invalidatedBeforeEntry}`);
+  if(metric(r.insufficientRoundTripLiquidity)>0)reasons.push(`容量不足 ${r.insufficientRoundTripLiquidity}`);
+  if(metric(r.roundTripCostTooHigh)>0)reasons.push(`往返成本过高 ${r.roundTripCostTooHigh}`);
+  return reasons.length?reasons.join(' · '):'—';
+};
 const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
 function pager(id,kind,page,totalPages,total){
   const disabledFirst=page<=1?'disabled':'';
@@ -110,9 +123,12 @@ function renderCohorts(){
   const body=visible.length?visible.map((r,index)=>{
     const ret=r.averageNetReturnPct;
     const key=`${r.recoveryProfileId}/${r.entryVariantId}/${r.positionSol}/${r.exitProfileId}`;
-    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code></td>${cell(r.scheduled)}${cell(r.resolved)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="11">暂无策略组合数据</td></tr>';
-  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>样本</th><th>CLOSED</th><th>Entry</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+body;
+    const model=String(r.quoteModel||'').split('_').at(-1)||'—';
+    const independent=r.resolvedEpisodes??r.resolved??0;
+    const sample=independent<30?'<span class="sample">样本不足</span>':'';
+    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code> <span class="label">${html(model)}</span>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="12">暂无策略组合数据</td></tr>';
+  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+body;
   pager('#cohort-pager','cohort',state.cohortPage,totalPages,rows.length);
 }
 function renderDumps(result){
@@ -151,8 +167,14 @@ async function refresh(){
     if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
     const d=summary.dumps,s=summary.sameSlotProbe,e=summary.execution;
-    const cards=[['独立砸盘事件',d.independent],['下一 Slot 恢复率',pct(d.nextSlotRecoveryRatePct)],['Same-Slot观察',s.observations],['Same-Slot可执行',s.executableSignals],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['扣费 PF',fmt(e.profitFactor)]];
+    const cards=[['独立砸盘事件',d.independent],['恢复事件',d.recoveredEpisodes],['独立已退出事件',e.resolvedEpisodes],['盈利事件（任一组合）',e.episodesWithAnyWin],['Entry Fill',pct(e.entryFillRatePct)],['Exit Fill',pct(e.exitFillRatePct)],['NO_EXIT',pct(e.noExitRatePct)],['确认模拟覆盖',pct(e.confirmationCoveragePct)],['扣费 PF',fmt(e.profitFactor)],['最大赢家事件贡献',pct(e.largestWinnerEventContributionPct)]];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
+    const notices=[];
+    if(metric(e.resolvedEpisodes)<100)notices.push(`<span class="warning">独立已退出事件仅 ${e.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
+    if(metric(e.largestWinnerEventContributionPct)>50)notices.push(`最大赢家事件贡献全部正收益的 <strong>${pct(e.largestWinnerEventContributionPct)}</strong>`);
+    if(metric(e.confirmationsWithoutSimulation)>0)notices.push(`<strong>${e.confirmationsWithoutSimulation}</strong> 个历史确认没有有效模拟记录`);
+    notices.push(`页面中的 ${e.scheduled??0} 条组合记录来自 <strong>${e.simulatedEpisodes??0}</strong> 个独立模拟事件，不能视为 ${e.scheduled??0} 个独立样本`);
+    document.querySelector('#research-notice').innerHTML=notices.join(' · ');
     state.cohorts=summary.cohorts||[];
     renderCohorts();
     renderSameSlot(sameSlotPage);

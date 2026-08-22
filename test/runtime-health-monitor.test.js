@@ -11,6 +11,8 @@ function configuration(overrides = {}) {
     startupGraceMs: 0,
     maxEventStaleMs: 120_000,
     maxPendingWrites: 5_000,
+    minDiskFreeBytes: 10 * 1024 ** 3,
+    minDiskFreePct: 10,
     fatalConsecutiveChecks: 3,
     ...overrides,
   };
@@ -105,4 +107,20 @@ test('a recovered component resets the consecutive failure counter', () => {
   const recovered = monitor.check();
   assert.equal(recovered.status, 'HEALTHY');
   assert.equal(recovered.consecutiveUnhealthy, 0);
+});
+
+test('low disk space is detected locally before the filesystem is full', () => {
+  const now = 4_000_000;
+  const state = healthy(now);
+  state.store.diskFreeBytes = 5 * 1024 ** 3;
+  state.store.diskFreePct = 8;
+  const monitor = new RuntimeHealthMonitor({
+    config: configuration(),
+    healthProvider: () => state,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => now,
+  });
+  const result = monitor.check();
+  assert.equal(result.status, 'DEGRADED');
+  assert.match(result.issues[0], /^DISK_LOW_5\.00GB_8\.00PCT$/);
 });

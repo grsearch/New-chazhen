@@ -6,13 +6,14 @@ const { PostDumpRecoveryEngine } = require('../src/core/PostDumpRecoveryEngine')
 
 class MemoryStore {
   constructor() {
+    this.trades = [];
     this.dumps = [];
     this.confirmations = [];
     this.sameSlotObservations = [];
     this.simulations = new Map();
   }
   listToxicWallets() { return []; }
-  recordTrade() {}
+  recordTrade(row) { this.trades.push(row); }
   insertDump(dump, toxic) { this.dumps.push({ dump, toxic }); }
   updateDump() {}
   insertSameSlotObservation(row) { this.sameSlotObservations.push(row); }
@@ -51,6 +52,9 @@ function configuration() {
       entryVariants: [{ id: 'E100', kind: 'DELAY', delayMs: 100 }],
       entryTimeoutMs: 2_000, exitDelayMs: 200, exitTimeoutMs: 2_000, exitGraceMs: 2_000,
       quoteModel: 'TEST', buySlippageBps: 0, sellSlippageBps: 0,
+      maxImmediateRoundTripLossPct: 100,
+      maxEntryLiquidityUsagePct: 100,
+      maxExitLiquidityUsagePct: 100,
       baseTxFeeSol: 0, priorityFeeSol: 0, jitoTipSol: 0,
       exitProfiles: [{ id: 'H1', kind: 'FIXED', holdMs: 1_000 }],
     },
@@ -83,8 +87,14 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   const observe = (row) => { now = row.receivedAtMs; return engine.observe(row); };
 
   observe(trade({ at: base - 100, slot: 500, tx: 1, side: 'BUY', sol: 0.1, price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 1 }));
+  assert.equal(store.trades.length, 0, 'unrelated global trades must stay in memory only');
   const signal = observe(trade({ at: base, slot: 501, tx: 1, side: 'SELL', sol: 20, price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 2 }));
   assert.ok(signal.dump, 'relative reserve pressure and drop should create one dump episode');
+  assert.deepEqual(
+    store.trades.map((row) => row.signature),
+    ['sig-1', 'sig-2'],
+    'dump detection backfills only the causal pre-window and signal trade',
+  );
   assert.equal(store.confirmations.length, 0, 'dump detection cannot enter immediately');
 
   observe(trade({ at: base + 100, slot: 501, tx: 2, side: 'BUY', sol: 10, price: 7.5e-8, wallet: 'same-slot', quoteSol: 75, sequence: 3 }));
@@ -114,6 +124,7 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   assert.ok(resolved.every((row) => row.status === 'CLOSED'));
   assert.ok(resolved.every((row) => row.exitHorizonLagMs >= 300));
   assert.ok(resolved.every((row) => Number.isFinite(row.netReturnPct)));
+  assert.equal(store.trades.length, 9, 'post-dump recovery and execution quotes remain auditable');
 });
 
 test('execution simulator independently blocks a same-slot confirmation', () => {
@@ -131,6 +142,66 @@ test('execution simulator independently blocks a same-slot confirmation', () => 
   assert.deepEqual(created, []);
   assert.equal(engine.execution.health().blockedSameSlot, 1);
   assert.equal(store.simulations.size, 0);
+});
+
+test('a second dump before delayed entry invalidates every pending shadow position', () => {
+  const base = 1_800_050_000_000;
+  let now = base;
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config: configuration(), store, now: () => now });
+  const observe = (row) => { now = row.receivedAtMs; return engine.observe(row); };
+  observe(trade({ at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1, price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 31 }));
+  observe(trade({ at: base, slot: 2, tx: 1, side: 'SELL', sol: 20, price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 32 }));
+  observe(trade({ at: base + 100, slot: 3, tx: 1, side: 'BUY', sol: 1.6, price: 7.3e-8, wallet: 'buyer-a', quoteSol: 73, sequence: 33 }));
+  observe(trade({ at: base + 150, slot: 3, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 34 }));
+  assert.ok([...store.simulations.values()].every((row) => row.status === 'PENDING_ENTRY'));
+
+  observe(trade({ at: base + 200, slot: 4, tx: 1, side: 'SELL', sol: 5, price: 6.5e-8, wallet: 'seller-2', quoteSol: 65, sequence: 35 }));
+  const rejected = [...store.simulations.values()];
+  assert.ok(rejected.every((row) => row.status === 'NO_ENTRY'));
+  assert.ok(rejected.every((row) => row.rejectionReason === 'RECOVERY_INVALIDATED_BEFORE_ENTRY'));
+  assert.equal(engine.execution.health().invalidatedBeforeEntry, rejected.length);
+  assert.equal(engine.execution.health().entryFilled, 0);
+});
+
+test('entry is rejected when the requested position consumes too much pool liquidity', () => {
+  const base = 1_800_060_000_000;
+  const store = new MemoryStore();
+  const config = configuration();
+  config.execution.maxEntryLiquidityUsagePct = 0.5;
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => base });
+  engine.execution.schedule({
+    confirmationId: 'capacity:R1', episodeId: 'capacity', profileId: 'PD-R1',
+    confirmedAtMs: base, slot: 10, snapshot: { slotDelta: 1 },
+    dump: { pool: 'pool', mint: 'mint', lowPrice: 7e-8, prePrice: 1e-7 },
+  });
+  engine.execution.observeTrade(
+    trade({ at: base + 100, slot: 11, tx: 1, side: 'BUY', sol: 0.1, price: 8e-8, wallet: 'quote', quoteSol: 80, sequence: 41 }),
+  );
+  const rejected = [...store.simulations.values()];
+  assert.ok(rejected.every((row) => row.status === 'NO_ENTRY'));
+  assert.ok(rejected.every((row) => row.rejectionReason === 'INSUFFICIENT_ROUND_TRIP_LIQUIDITY'));
+  assert.ok(rejected.every((row) => Number.isFinite(row.entryCapacityRoundTripLossPct)));
+});
+
+test('entry is rejected when immediate net round-trip cost exceeds the configured limit', () => {
+  const base = 1_800_070_000_000;
+  const store = new MemoryStore();
+  const config = configuration();
+  config.execution.maxImmediateRoundTripLossPct = 0;
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => base });
+  engine.execution.schedule({
+    confirmationId: 'cost:R1', episodeId: 'cost', profileId: 'PD-R1',
+    confirmedAtMs: base, slot: 10, snapshot: { slotDelta: 1 },
+    dump: { pool: 'pool', mint: 'mint', lowPrice: 7e-8, prePrice: 1e-7 },
+  });
+  engine.execution.observeTrade(
+    trade({ at: base + 100, slot: 11, tx: 1, side: 'BUY', sol: 0.1, price: 8e-8, wallet: 'quote', quoteSol: 100, sequence: 42 }),
+  );
+  const rejected = [...store.simulations.values()];
+  assert.ok(rejected.every((row) => row.status === 'NO_ENTRY'));
+  assert.ok(rejected.every((row) => row.rejectionReason === 'ROUND_TRIP_COST_TOO_HIGH'));
+  assert.ok(rejected.every((row) => row.entryCapacityRoundTripLossPct > 0));
 });
 
 test('same-slot probe expires inactive dumps without creating strategy state', () => {

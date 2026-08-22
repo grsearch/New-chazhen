@@ -135,6 +135,17 @@ class RuntimeHealthMonitor {
       issues.push(`DB_WRITE_ERRORS_INCREASED_${storeErrors - this.lastStoreErrors}`);
     }
     this.lastStoreErrors = storeErrors;
+    const diskFreeBytes = finite(store.diskFreeBytes);
+    const diskFreePct = finite(store.diskFreePct);
+    const diskBelowBytes = diskFreeBytes != null && this.config.minDiskFreeBytes != null
+      && diskFreeBytes < this.config.minDiskFreeBytes;
+    const diskBelowPct = diskFreePct != null && this.config.minDiskFreePct != null
+      && diskFreePct < this.config.minDiskFreePct;
+    if (diskBelowBytes || diskBelowPct) {
+      const freeGb = diskFreeBytes == null ? 'UNKNOWN' : (diskFreeBytes / 1024 ** 3).toFixed(2);
+      const freePct = diskFreePct == null ? 'UNKNOWN' : diskFreePct.toFixed(2);
+      issues.push(`DISK_LOW_${freeGb}GB_${freePct}PCT`);
+    }
     return issues;
   }
 
@@ -150,6 +161,8 @@ class RuntimeHealthMonitor {
       checkIntervalMs: this.config.checkIntervalMs,
       maxEventStaleMs: this.config.maxEventStaleMs,
       maxPendingWrites: this.config.maxPendingWrites,
+      minDiskFreeBytes: this.config.minDiskFreeBytes,
+      minDiskFreePct: this.config.minDiskFreePct,
       fatalConsecutiveChecks: this.config.fatalConsecutiveChecks,
       ...this.metrics,
     };

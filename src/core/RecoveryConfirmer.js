@@ -177,6 +177,10 @@ class RecoveryConfirmer {
     return expired;
   }
 
+  isObservingPool(pool) {
+    return Boolean(pool && this.byPool.has(pool));
+  }
+
   _profileMet(profile, snapshot) {
     if (!(snapshot.slotDelta > 0) || snapshot.slotDelta > profile.maxSlotDelta) return false;
     if (snapshot.priceBouncePct < profile.minPriceBouncePct) return false;

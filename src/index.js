@@ -14,9 +14,10 @@ async function main() {
   const store = new ResearchStore(config.storage);
   const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
     'PUMPSWAP_CPMM_EVENT_FEES_V1',
+    'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
   ]);
   if (removedInvalidFeeSimulations > 0) {
-    console.log(`Removed ${removedInvalidFeeSimulations} simulations from the invalid V1 fee model.`);
+    console.log(`Removed ${removedInvalidFeeSimulations} simulations from invalid legacy execution models.`);
   }
   const removedLegacySimulations = store.deleteSimulationsByPositionSizes([0.02, 0.05, 0.1]);
   if (removedLegacySimulations > 0) {

@@ -78,6 +78,7 @@ function quoteBuy(trade, spendSol, { slippageBps = 0 } = {}) {
     marketPrice,
     tokenUnits,
     baseOutRaw: baseOutRaw.toString(),
+    curveInputRaw: curveInputRaw.toString(),
     userInputSol: spend,
     impactPct: marketPrice > 0 ? (price / marketPrice - 1) * 100 : null,
     liquidityUsagePct: Number(inputRaw) / Number(reserves.quoteRaw) * 100,
@@ -85,6 +86,48 @@ function quoteBuy(trade, spendSol, { slippageBps = 0 } = {}) {
     totalFeeBps: protocolBps,
     slippageBps: slip,
     reserveSource: reserves.source,
+  };
+}
+
+function reservesAfterBuy(trade, buy) {
+  const reserves = effectiveReserves(trade);
+  if (!reserves || !buy?.available) return null;
+  const baseOutRaw = bigint(buy.baseOutRaw);
+  const curveInputRaw = bigint(buy.curveInputRaw);
+  const baseRaw = reserves.baseRaw - baseOutRaw;
+  const quoteRaw = reserves.quoteRaw + curveInputRaw;
+  if (baseRaw <= 0n || quoteRaw <= 0n) return null;
+  return {
+    ...trade,
+    poolBaseReservesRaw: baseRaw.toString(),
+    effectiveQuoteReservesRaw: quoteRaw.toString(),
+  };
+}
+
+function quoteImmediateRoundTrip(trade, spendSol, {
+  buySlippageBps = 0,
+  sellSlippageBps = 0,
+} = {}) {
+  const spend = finite(spendSol);
+  const buy = quoteBuy(trade, spend, { slippageBps: buySlippageBps });
+  if (!buy.available) return { available: false, reason: buy.reason, buy, sell: null };
+  const afterBuy = reservesAfterBuy(trade, buy);
+  if (!afterBuy) {
+    return { available: false, reason: 'POST_BUY_RESERVES_UNAVAILABLE', buy, sell: null };
+  }
+  const sell = quoteSell(afterBuy, buy.tokenUnits, { slippageBps: sellSlippageBps });
+  if (!sell.available) return { available: false, reason: sell.reason, buy, sell };
+  const roundTripLossPct = spend > 0 ? Math.max(0, (1 - sell.proceedsSol / spend) * 100) : null;
+  return {
+    available: true,
+    reason: null,
+    buy,
+    sell,
+    afterBuy,
+    proceedsSol: sell.proceedsSol,
+    roundTripLossPct,
+    entryLiquidityUsagePct: buy.liquidityUsagePct,
+    exitLiquidityUsagePct: sell.liquidityUsagePct,
   };
 }
 
@@ -155,6 +198,8 @@ module.exports = {
   reservePrice,
   quoteBuy,
   quoteSell,
+  quoteImmediateRoundTrip,
+  reservesAfterBuy,
   reconstructPreSell,
   transactionFeeSol,
 };
