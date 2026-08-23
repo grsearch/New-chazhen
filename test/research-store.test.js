@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { ResearchStore } = require('../src/data/ResearchStore');
+const { ResearchStore, shadowScenarioStats } = require('../src/data/ResearchStore');
 
 function storedTrade(signature, receivedAtMs) {
   return {
@@ -11,6 +11,18 @@ function storedTrade(signature, receivedAtMs) {
     mint: 'mint', pool: 'pool', solAmount: 1, tokenAmount: 10,
   };
 }
+
+test('Same-Slot scenarios include NO_EXIT loss and Jito tip sensitivity', () => {
+  const stats = shadowScenarioStats({
+    closedRows: [{ net_return_pct: 5, position_sol: 1, modeled_jito_tip_sol: 0 }],
+    noExit: 1,
+    noExitLossPcts: [-15, -100],
+    jitoTipScenariosSol: [0.01],
+  });
+  assert.equal(stats.noExitScenarios[0].averageNetReturnPct, -5);
+  assert.equal(stats.noExitScenarios[1].averageNetReturnPct, -47.5);
+  assert.equal(stats.jitoTipScenarios[0].averageNetReturnPct, 3);
+});
 
 test('trade rows omit duplicate raw JSON and old event windows are pruned in bounded batches', () => {
   const now = 100_000;
@@ -234,6 +246,8 @@ test('same-slot observations expose strict post-dump chain rank', () => {
   assert.equal(summary.sameSlotProbe.rank1Buys, 1);
   assert.equal(summary.sameSlotProbe.rank2Buys, 1);
   assert.equal(summary.sameSlotProbe.eventsWithTop2Buys, 1);
+  assert.equal(summary.sameSlotProbe.rank2ReceiveLagP50Ms, 20);
+  assert.equal(summary.sameSlotProbe.rank2InterBuyGapP50Ms, -10);
   store.close();
 });
 
@@ -252,7 +266,10 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
     infrastructureReason: 'POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE',
     parseBudgetMs: 2, buildBudgetMs: 5, signBudgetMs: 1, sendBudgetMs: 15,
     responseBudgetMs: 23, competitorObservedAtMs: 1020, competitorReceiveLagMs: 20,
-    competitorHeadroomMs: -3, entryAssumption: 'THEORETICAL', entryReferenceRank: 0,
+    latencyModel: 'ENTRY_REFERENCE_TO_NEXT_COMPETITOR_V2', competitorReferenceAtMs: 1000,
+    competitorGapMs: 20, competitorHeadroomMs: -3, entryProfileId: 'R1-RAW',
+    dataQualityStatus: 'TRUSTED', dataQualityReasons: [], modeledJitoTipSol: 0.005,
+    entryAssumption: 'THEORETICAL', entryReferenceRank: 0,
     entryAtMs: 1000, entrySlot: 10, entryReferenceSignature: 'dump',
     entryReferenceTransactionIndex: 1, entryReferenceInstructionIndex: 0,
     entryReferenceEventIndex: 0, entryPrice: 1, entryMarketPrice: 1,
@@ -271,6 +288,8 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   });
   store.insertSameSlotShadow({
     ...base, shadowId: 'rank-2', targetRank: 2, entryReferenceRank: 1,
+    entryProfileId: 'R2-B2', triggerBuySol: 3, triggerBuyToDumpPct: 30,
+    triggerWallet: 'trigger-wallet',
     status: 'NO_EXIT', rejectionReason: 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON',
   });
   store.flush();
@@ -287,10 +306,19 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
     [1, 2],
   );
   const stored = store.db.prepare(`
-    SELECT infrastructure_executable,competitor_headroom_ms
-    FROM same_slot_shadow_simulations WHERE shadow_id='rank-1'
+    SELECT infrastructure_executable,entry_profile_id,latency_model,competitor_gap_ms,
+      trigger_buy_sol,data_quality_status,modeled_jito_tip_sol
+    FROM same_slot_shadow_simulations WHERE shadow_id='rank-2'
   `).get();
-  assert.deepEqual(stored, { infrastructure_executable: 0, competitor_headroom_ms: -3 });
+  assert.deepEqual(stored, {
+    infrastructure_executable: 0,
+    entry_profile_id: 'R2-B2',
+    latency_model: 'ENTRY_REFERENCE_TO_NEXT_COMPETITOR_V2',
+    competitor_gap_ms: 20,
+    trigger_buy_sol: 3,
+    data_quality_status: 'TRUSTED',
+    modeled_jito_tip_sol: 0.005,
+  });
   store.close();
 });
 
@@ -330,6 +358,54 @@ test('legacy price parses and drops over 40 percent stay out of strategy statist
   assert.equal(summary.sameSlotProbe.observations, 1);
   assert.equal(store.recentDumpsPage(1, 20).total, 1);
   assert.equal(store.recentSameSlotObservationsPage(1, 20).total, 1);
+  store.close();
+});
+
+test('abnormal recovery events remain stored but are excluded from every strategy summary', () => {
+  const store = new ResearchStore({
+    dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
+    acceptedDumpParseVersion: 'V3', maxReportedRecoveryPct: 500,
+    sameSlotQuoteModel: 'SHADOW_V2',
+  });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,max_recovery_pct,
+      parse_version,updated_at_ms
+    ) VALUES('abnormal','mint','pool',1,'STRICT','[]','CONFIRMED',0,20,600,'V3',2)
+  `).run();
+  store.db.prepare(`
+    INSERT INTO confirmations(
+      confirmation_id,episode_id,profile_id,confirmed_at_ms,ordering_confidence,snapshot_json
+    ) VALUES('abnormal:R1','abnormal','R1',2,'STRICT','{}')
+  `).run();
+  store.db.prepare(`
+    INSERT INTO simulations(
+      simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
+      entry_kind,entry_delay_ms,exit_profile_id,position_sol,quote_model,status,
+      confirmed_at_ms,entry_at_ms,net_return_pct,created_at_ms,updated_at_ms
+    ) VALUES('abnormal-sim','abnormal:R1','abnormal','R1','E100','DELAY',100,
+      'H1',1,'EXEC_V4','CLOSED',2,3,100,2,4)
+  `).run();
+  store.db.prepare(`
+    INSERT INTO same_slot_shadow_simulations(
+      shadow_id,episode_id,target_rank,entry_profile_id,position_sol,exit_horizon_ms,
+      quote_model,status,infrastructure_mode,infrastructure_executable,
+      infrastructure_reason,data_quality_status,entry_assumption,entry_reference_rank,
+      entry_at_ms,net_return_pct,created_at_ms,updated_at_ms
+    ) VALUES('abnormal-shadow','abnormal',2,'R2-B2',1,500,'SHADOW_V2','CLOSED',
+      'THEORETICAL_ONLY',0,'TEST','TRUSTED','THEORETICAL',1,2,100,2,4)
+  `).run();
+
+  const summary = store.summary();
+  assert.equal(summary.dumps.independent, 0);
+  assert.equal(summary.dumps.abnormalRecoveryEvents, 1);
+  assert.equal(summary.dumps.recoveredEpisodes, 0);
+  assert.equal(summary.execution.scheduled, 0);
+  assert.equal(summary.sameSlotShadow.scheduled, 0);
+  assert.deepEqual(summary.cohorts, []);
+  assert.deepEqual(summary.sameSlotShadowCohorts, []);
+  assert.equal(store.db.prepare('SELECT COUNT(*) count FROM simulations').get().count, 1);
   store.close();
 });
 

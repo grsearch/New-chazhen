@@ -205,12 +205,19 @@ class RecoveryConfirmer {
 
   _snapshot(state, trade) {
     const at = finite(trade?.receivedAtMs ?? trade?.timestampMs, this.now());
-    const priceBouncePct = state.lowPrice > 0
+    const rawPriceBouncePct = state.lowPrice > 0
       ? (state.currentPrice / state.lowPrice - 1) * 100 : null;
     const dropRange = state.dump.prePrice - state.lowPrice;
-    const dropRecoveryPct = dropRange > 0
+    const rawDropRecoveryPct = dropRange > 0
       ? (state.currentPrice - state.lowPrice) / dropRange * 100 : null;
-    state.maxRecoveryPct = Math.max(state.maxRecoveryPct, finite(dropRecoveryPct, 0));
+    const maxReported = finite(this.config.maxReportedRecoveryPct, 500);
+    const priceBouncePct = rawPriceBouncePct != null && rawPriceBouncePct <= maxReported
+      ? rawPriceBouncePct : null;
+    const dropRecoveryPct = rawDropRecoveryPct != null && rawDropRecoveryPct <= maxReported
+      ? rawDropRecoveryPct : null;
+    if (dropRecoveryPct != null) {
+      state.maxRecoveryPct = Math.max(state.maxRecoveryPct, finite(dropRecoveryPct, 0));
+    }
     const netFlowAt = (windowMs) => state.flowEvents
       .filter((row) => row.at >= at - windowMs)
       .reduce((sum, row) => sum + row.amount, 0);

@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
+  effectiveReserves, quoteImmediateRoundTrip, quoteSell, reservePrice, transactionFeeSol,
 } = require('./AmmQuote');
 const { strictlyAfter } = require('./SlotAssembler');
 
@@ -24,6 +24,42 @@ function causallyAfter(candidate, reference) {
   if (candidateSlot == null || referenceSlot == null) return false;
   if (candidateSlot !== referenceSlot) return candidateSlot > referenceSlot;
   return strictlyAfter(candidate, reference) === true;
+}
+
+function pct(part, whole) {
+  return whole > 0 ? part / whole * 100 : null;
+}
+
+function dataQuality(trade, config, referenceTrade = null) {
+  const reasons = [];
+  const reserves = effectiveReserves(trade);
+  const quoteSol = reserves ? Number(reserves.quoteRaw) / 1e9 : null;
+  const tradeSol = Math.max(0, finite(trade?.solAmount, 0));
+  const eventPrice = finite(trade?.price);
+  const currentReservePrice = reservePrice(trade);
+  if (tradeSol > config.maxTradeSol) reasons.push('TRADE_SOL_ABOVE_LIMIT');
+  if (quoteSol != null && quoteSol > config.maxQuoteReserveSol) {
+    reasons.push('QUOTE_RESERVE_ABOVE_LIMIT');
+  }
+  if (quoteSol > 0 && pct(tradeSol, quoteSol) > config.maxTradeToQuotePct) {
+    reasons.push('TRADE_TO_QUOTE_ABOVE_LIMIT');
+  }
+  if (eventPrice > 0 && currentReservePrice > 0
+    && Math.abs(eventPrice / currentReservePrice - 1) * 100
+      > config.maxEventReservePriceDeviationPct) {
+    reasons.push('EVENT_RESERVE_PRICE_DIVERGENCE');
+  }
+  const referenceReserves = referenceTrade ? effectiveReserves(referenceTrade) : null;
+  const referenceQuoteSol = referenceReserves ? Number(referenceReserves.quoteRaw) / 1e9 : null;
+  if (quoteSol > 0 && referenceQuoteSol > 0
+    && Math.max(quoteSol, referenceQuoteSol) / Math.min(quoteSol, referenceQuoteSol)
+      > config.maxQuoteReserveChangeMultiple) {
+    reasons.push('QUOTE_RESERVE_DISCONTINUITY');
+  }
+  return {
+    status: reasons.length ? 'QUARANTINED' : 'TRUSTED',
+    reasons: [...new Set(reasons)],
+  };
 }
 
 class SameSlotShadowSimulator {
@@ -51,6 +87,8 @@ class SameSlotShadowSimulator {
       rank2Entries: 0,
       insufficientRoundTripLiquidity: 0,
       roundTripCostTooHigh: 0,
+      rank2B2Entries: 0,
+      dataQualityQuarantined: 0,
     };
   }
 
@@ -60,7 +98,12 @@ class SameSlotShadowSimulator {
       this.metrics.toxicEpisodesSkipped += 1;
       return [];
     }
-    this.episodes.set(dump.episodeId, { dump, trades: [], finalized: false });
+    this.episodes.set(dump.episodeId, {
+      dump,
+      trades: [],
+      finalized: false,
+      dataQuality: dataQuality(dump.signalTrade, this.config),
+    });
     const episodeIds = this.episodesByPool.get(dump.pool) || new Set();
     episodeIds.add(dump.episodeId);
     this.episodesByPool.set(dump.pool, episodeIds);
@@ -111,6 +154,22 @@ class SameSlotShadowSimulator {
       const sell = quoteSell(trade, simulation.tokenUnits, {
         slippageBps: this.config.sellSlippageBps,
       });
+      const exitQuality = dataQuality(trade, this.config, simulation.entryReferenceTrade);
+      if (exitQuality.status !== 'TRUSTED') {
+        simulation.status = 'NO_EXIT';
+        simulation.rejectionReason = 'DATA_QUALITY_REJECTED_EXIT';
+        simulation.dataQualityStatus = 'QUARANTINED';
+        simulation.dataQualityReasons = [
+          ...(simulation.dataQualityReasons || []), ...exitQuality.reasons,
+        ];
+        simulation.updatedAtMs = at;
+        this.metrics.noExit += 1;
+        this.metrics.dataQualityQuarantined += 1;
+        this._finish(simulation);
+        this.store?.updateSameSlotShadow?.(simulation);
+        changed.push(simulation);
+        continue;
+      }
       if (!sell.available) {
         simulation.updatedAtMs = at;
         this.store?.updateSameSlotShadow?.(simulation);
@@ -161,27 +220,57 @@ class SameSlotShadowSimulator {
     const created = this._scheduleRank({
       dump,
       targetRank: 1,
+      entryProfileId: 'R1-RAW',
       entryReferenceTrade: dump.signalTrade,
       entryAtMs: dump.detectedAtMs,
       entryAssumption: 'THEORETICAL_RANK_1_POST_DUMP_STATE',
       entryReferenceRank: 0,
+      triggerTrade: null,
+      quality: state.dataQuality,
     });
     if (strictBuys[0]) {
+      const firstBuyAtMs = finite(
+        strictBuys[0].receivedAtMs ?? strictBuys[0].timestampMs,
+        dump.detectedAtMs,
+      );
+      const rank2ProfileId = finite(strictBuys[0].solAmount, 0)
+        >= this.config.minRank2TriggerBuySol ? 'R2-B2' : 'R2-BASE';
+      const rank2Quality = dataQuality(strictBuys[0], this.config, dump.signalTrade);
+      const combinedQuality = {
+        status: state.dataQuality.status === 'TRUSTED' && rank2Quality.status === 'TRUSTED'
+          ? 'TRUSTED' : 'QUARANTINED',
+        reasons: [...new Set([...state.dataQuality.reasons, ...rank2Quality.reasons])],
+      };
       created.push(...this._scheduleRank({
         dump,
         targetRank: 2,
+        entryProfileId: rank2ProfileId,
         entryReferenceTrade: strictBuys[0],
-        entryAtMs: finite(
+        entryAtMs: firstBuyAtMs,
+        entryAssumption: 'THEORETICAL_RANK_2_AFTER_OBSERVED_RANK_1',
+        entryReferenceRank: 1,
+        triggerTrade: strictBuys[0],
+        quality: combinedQuality,
+      }));
+      this._recordCompetitor({
+        episodeId: dump.episodeId,
+        targetRank: 1,
+        trade: strictBuys[0],
+        dumpDetectedAtMs: dump.detectedAtMs,
+        referenceAtMs: dump.detectedAtMs,
+      });
+    }
+    if (strictBuys[1]) {
+      this._recordCompetitor({
+        episodeId: dump.episodeId,
+        targetRank: 2,
+        trade: strictBuys[1],
+        dumpDetectedAtMs: dump.detectedAtMs,
+        referenceAtMs: finite(
           strictBuys[0].receivedAtMs ?? strictBuys[0].timestampMs,
           dump.detectedAtMs,
         ),
-        entryAssumption: 'THEORETICAL_RANK_2_AFTER_OBSERVED_RANK_1',
-        entryReferenceRank: 1,
-      }));
-      this._recordCompetitor(dump.episodeId, 1, strictBuys[0], dump.detectedAtMs);
-    }
-    if (strictBuys[1]) {
-      this._recordCompetitor(dump.episodeId, 2, strictBuys[1], dump.detectedAtMs);
+      });
     }
     for (const simulation of created) {
       if (simulation.status === 'NO_ENTRY') this.simulations.delete(simulation.shadowId);
@@ -191,7 +280,8 @@ class SameSlotShadowSimulator {
   }
 
   _scheduleRank({
-    dump, targetRank, entryReferenceTrade, entryAtMs, entryAssumption, entryReferenceRank,
+    dump, targetRank, entryProfileId, entryReferenceTrade, entryAtMs, entryAssumption,
+    entryReferenceRank, triggerTrade, quality,
   }) {
     if (!this.config.targetRanks.includes(targetRank)) return [];
     const created = [];
@@ -205,6 +295,10 @@ class SameSlotShadowSimulator {
       const capacityRoundTripLossPct = capacity.available
         ? Math.max(0, (1 - capacityNetProceedsSol / positionSol) * 100) : null;
       let rejectionReason = capacity.available ? null : capacity.reason;
+      if (quality.status !== 'TRUSTED') {
+        rejectionReason = 'DATA_QUALITY_REJECTED_ENTRY';
+        this.metrics.dataQualityQuarantined += this.config.exitHorizonsMs.length;
+      }
       if (!rejectionReason && (
         capacity.entryLiquidityUsagePct > this.config.maxEntryLiquidityUsagePct
         || capacity.exitLiquidityUsagePct > this.config.maxExitLiquidityUsagePct
@@ -228,6 +322,7 @@ class SameSlotShadowSimulator {
           shadowId,
           episodeId: dump.episodeId,
           targetRank,
+          entryProfileId,
           positionSol,
           exitHorizonMs,
           quoteModel: this.config.quoteModel,
@@ -241,9 +336,17 @@ class SameSlotShadowSimulator {
           signBudgetMs: this.config.signBudgetMs,
           sendBudgetMs: this.config.sendBudgetMs,
           responseBudgetMs: this.responseBudgetMs,
+          latencyModel: 'ENTRY_REFERENCE_TO_NEXT_COMPETITOR_V2',
           competitorObservedAtMs: null,
           competitorReceiveLagMs: null,
+          competitorReferenceAtMs: null,
+          competitorGapMs: null,
           competitorHeadroomMs: null,
+          triggerBuySol: finite(triggerTrade?.solAmount),
+          triggerBuyToDumpPct: pct(finite(triggerTrade?.solAmount, 0), finite(dump.sellSol, 0)),
+          triggerWallet: triggerTrade?.wallet || null,
+          dataQualityStatus: quality.status,
+          dataQualityReasons: quality.reasons,
           entryAssumption,
           entryReferenceRank,
           entryAtMs,
@@ -269,10 +372,12 @@ class SameSlotShadowSimulator {
           entryReserveSource: buy.reserveSource ?? null,
           entryFeeSol: this.txFeeSol,
           exitFeeSol: this.txFeeSol,
+          modeledJitoTipSol: Math.max(0, finite(this.config.jitoTipSol, 0)),
           requestedExitAtMs: entryAtMs + exitHorizonMs,
           exitDeadlineAtMs: entryAtMs + exitHorizonMs + this.config.exitTimeoutMs,
           postHorizonTrades: 0,
           dump,
+          entryReferenceTrade,
           createdAtMs: now,
           updatedAtMs: now,
         };
@@ -287,6 +392,7 @@ class SameSlotShadowSimulator {
           this.metrics.entryFilled += 1;
           if (targetRank === 1) this.metrics.rank1Entries += 1;
           if (targetRank === 2) this.metrics.rank2Entries += 1;
+          if (entryProfileId === 'R2-B2') this.metrics.rank2B2Entries += 1;
         }
         this.store?.insertSameSlotShadow?.(simulation);
         created.push(simulation);
@@ -295,14 +401,19 @@ class SameSlotShadowSimulator {
     return created;
   }
 
-  _recordCompetitor(episodeId, targetRank, trade, dumpDetectedAtMs) {
+  _recordCompetitor({
+    episodeId, targetRank, trade, dumpDetectedAtMs, referenceAtMs,
+  }) {
     const observedAtMs = finite(trade.receivedAtMs ?? trade.timestampMs, this.now());
     const receiveLagMs = Math.max(0, observedAtMs - dumpDetectedAtMs);
+    const gapMs = observedAtMs - referenceAtMs;
     for (const simulation of this.simulations.values()) {
       if (simulation.episodeId !== episodeId || simulation.targetRank !== targetRank) continue;
       simulation.competitorObservedAtMs = observedAtMs;
       simulation.competitorReceiveLagMs = receiveLagMs;
-      simulation.competitorHeadroomMs = receiveLagMs - this.responseBudgetMs;
+      simulation.competitorReferenceAtMs = referenceAtMs;
+      simulation.competitorGapMs = gapMs;
+      simulation.competitorHeadroomMs = gapMs - this.responseBudgetMs;
       simulation.updatedAtMs = observedAtMs;
       this.store?.updateSameSlotShadow?.(simulation);
     }

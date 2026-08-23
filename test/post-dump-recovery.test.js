@@ -42,6 +42,7 @@ function configuration() {
     },
     recovery: {
       maxObservationMs: 20_000, maxSlotDelta: 40, minValidBuySol: 0.05,
+      maxReportedRecoveryPct: 500,
       secondDumpMinSol: 1, secondDumpFractionOfInitial: 0.2,
       secondDumpMinPriceDropPct: 8, buyerStallMs: 5_000,
       profiles: [{
@@ -58,6 +59,9 @@ function configuration() {
       maxEntryLiquidityUsagePct: 100, maxExitLiquidityUsagePct: 100,
       baseTxFeeSol: 0, priorityFeeSol: 0, jitoTipSol: 0,
       parseBudgetMs: 2, buildBudgetMs: 5, signBudgetMs: 1, sendBudgetMs: 15,
+      minRank2TriggerBuySol: 2,
+      maxTradeSol: 1_000, maxQuoteReserveSol: 10_000, maxTradeToQuotePct: 50,
+      maxEventReservePriceDeviationPct: 100, maxQuoteReserveChangeMultiple: 5,
     },
     execution: {
       positionSizesSol: [1],
@@ -129,6 +133,8 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
   assert.equal(rank2.status, 'CLOSED');
   assert.equal(rank2.exitHorizonMs, 100);
+  assert.equal(rank2.entryProfileId, 'R2-B2');
+  assert.equal(rank2.triggerBuySol, 10);
   assert.equal(store.sameSlotObservations.length, 1, 'next-slot buys are not probe observations');
   observe(trade({ at: base + 250, slot: 502, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 5 }));
   assert.equal(store.confirmations.length, 1, 'two independent buyers and real recovery should confirm R1');
@@ -234,8 +240,43 @@ test('Same-Slot Shadow assigns rank from chain order instead of receive order', 
   const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
   assert.equal(rank2.entryReferenceSignature, 'sig-29');
   assert.equal(rank2.competitorReceiveLagMs, 50, 'rank 2 competitor was received earlier');
+  assert.equal(rank2.competitorGapMs, -10, 'rank 2 gap is second-buy receive minus first-buy receive');
+  assert.equal(rank2.competitorHeadroomMs, -33, 'rank 2 headroom uses the inter-buy gap');
   const rank1 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 1);
   assert.equal(rank1.competitorReceiveLagMs, 60, 'rank 1 follows transactionIndex, not arrival');
+  assert.equal(rank1.competitorGapMs, 60);
+  assert.equal(rank1.competitorHeadroomMs, 37);
+});
+
+test('Same-Slot Shadow quarantines discontinuous reserve data from strategy returns', () => {
+  const base = 1_800_048_000_000;
+  const config = configuration();
+  config.sameSlotShadow.maxQuoteReserveChangeMultiple = 1.05;
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => base });
+  engine.observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 31,
+  }));
+  engine.observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 20,
+    price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 32,
+  }));
+  engine.observe(trade({
+    at: base + 50, slot: 2, tx: 2, side: 'BUY', sol: 3,
+    price: 7.5e-8, wallet: 'trigger', quoteSol: 75, sequence: 33,
+  }));
+  engine.observe(trade({
+    at: base + 200, slot: 3, tx: 1, side: 'BUY', sol: 1,
+    price: 8e-8, wallet: 'next-slot', quoteSol: 80, sequence: 34,
+  }));
+
+  const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
+  assert.equal(rank2.entryProfileId, 'R2-B2');
+  assert.equal(rank2.status, 'NO_ENTRY');
+  assert.equal(rank2.rejectionReason, 'DATA_QUALITY_REJECTED_ENTRY');
+  assert.equal(rank2.dataQualityStatus, 'QUARANTINED');
+  assert.deepEqual(rank2.dataQualityReasons, ['QUOTE_RESERVE_DISCONTINUITY']);
 });
 
 test('a second dump before delayed entry invalidates every pending shadow position', () => {

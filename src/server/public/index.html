@@ -43,6 +43,7 @@
     .notice strong { color:var(--text); }
     .warning { color:#ffbf69; }
     .sample { margin-left:7px; font-size:11px; color:#ffbf69; }
+    tr.primary { background:rgba(80,216,144,.07); }
     @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} .panel-head{align-items:start;flex-direction:column}.pager{justify-content:center;flex-wrap:wrap}.pager-info{order:-1;width:100%} }
   </style>
 </head>
@@ -55,7 +56,7 @@
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
   <section class="panel">
-    <div class="panel-head"><h2>核心：Same-Slot Shadow（目标排名 × 仓位 × 快速退出）</h2><span class="sort-note">理论成交 · 默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="panel-head"><h2>核心：R2-B2 与 Same-Slot Shadow 对照组</h2><span class="sort-note">R2-B2 = 第一笔严格同Slot买单≥2 SOL · 理论成交</span></div>
     <div class="table-wrap"><table id="same-slot-shadow"></table></div><div class="pager" id="same-slot-shadow-pager"></div>
   </section>
   <section class="panel">
@@ -113,6 +114,10 @@ const noEntryReasons=r=>{
   if(metric(r.roundTripCostTooHigh)>0)reasons.push(`往返成本过高 ${r.roundTripCostTooHigh}`);
   return reasons.length?reasons.join(' · '):'—';
 };
+const scenario=(rows,key,value)=>{
+  const row=(rows||[]).find(item=>Number(item[key])===Number(value));
+  return row?.averageNetReturnPct??null;
+};
 const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
 function pager(id,kind,page,totalPages,total){
   const disabledFirst=page<=1?'disabled':'';
@@ -144,12 +149,16 @@ function renderShadowCohorts(){
   const visible=rows.slice(start,start+PAGE_SIZE);
   const body=visible.length?visible.map((r,index)=>{
     const ret=r.averageNetReturnPct;
-    const key=`Rank#${r.targetRank}/${r.positionSol}SOL/${r.exitHorizonMs}ms`;
+    const profile=r.entryProfileId||`Rank#${r.targetRank}`;
+    const key=`${profile}/Rank#${r.targetRank}/${r.positionSol}SOL/${r.exitHorizonMs}ms`;
     const independent=r.resolvedEpisodes??r.resolved??0;
     const sample=independent<30?'<span class="sample">样本不足</span>':'';
-    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="13">暂无 Same-Slot Shadow 数据</td></tr>';
-  document.querySelector('#same-slot-shadow').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>理论Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th><th>可执行性</th></tr>'+body;
+    const noExit15=scenario(r.noExitScenarios,'lossPct',-15);
+    const noExit100=scenario(r.noExitScenarios,'lossPct',-100);
+    const jito001=scenario(r.jitoTipScenarios,'tipSol',0.01);
+    return `<tr class="${profile==='R2-B2'?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(fmt(r.averageTriggerBuySol,2))}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(noExit15),metric(noExit15)>0?'good':'bad')}${cell(pct(noExit100),metric(noExit100)>0?'good':'bad')}${cell(pct(jito001),metric(jito001)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="17">暂无 Same-Slot Shadow 数据</td></tr>';
+  document.querySelector('#same-slot-shadow').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>首买SOL</th><th>理论Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>CLOSED均值</th><th>含NO_EXIT=-15%</th><th>含NO_EXIT=-100%</th><th>Jito 0.01</th><th>PF</th><th>最差5%</th><th>可执行性</th></tr>'+body;
   pager('#same-slot-shadow-pager','shadow',state.shadowPage,totalPages,rows.length);
 }
 function renderDumps(result){
@@ -193,13 +202,18 @@ async function refresh(){
     if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
     const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution;
-    const cards=[['Shadow独立已退出',sh.resolvedEpisodes],['Shadow胜率',pct(sh.winRatePct)],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['Shadow扣费PF',fmt(sh.profitFactor)],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2延迟P50',s.rank2ReceiveLagP50Ms==null?'—':`${fmt(s.rank2ReceiveLagP50Ms,0)}ms`],['同Slot第1/2样本',`${s.rank1Buys??0}/${s.rank2Buys??0}`],['独立砸盘事件',d.independent],['对照组独立已退出',e.resolvedEpisodes]];
+    const cards=[['R2-B2独立事件',sh.primaryProfileEpisodes],['Shadow独立已退出',sh.resolvedEpisodes],['Shadow胜率',pct(sh.winRatePct)],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2买单间隔P50',s.rank2InterBuyGapP50Ms==null?'—':`${fmt(s.rank2InterBuyGapP50Ms,0)}ms`],['Rank#2 23ms余量',pct(sh.rank2PositiveHeadroomPct)],['数据隔离组合',sh.dataQualityQuarantined],['实际覆盖时长',sh.coverageHours==null?'—':`${fmt(sh.coverageHours,1)}h`],['独立砸盘事件',d.independent]];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
     const notices=[];
     notices.push('<strong>Shadow口径：</strong>Rank#1/#2均为理论入场，使用之后第一笔严格因果公开储备作为退出报价；当前程序不签名、不发送交易');
-    notices.push('<strong>速度口径：</strong>排名#1/#2是已经上链的竞争者买单；LaserStream收到时交易已经执行，不能当成本系统可获得的成交排名');
+    notices.push('<strong>速度口径：</strong>Rank#2余量按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算；仍不包含Leader排队与真实落地时间');
+    notices.push('<strong>R2-B2：</strong>只使用第一笔严格同Slot买单≥2 SOL这一入场时已知条件，其他Rank#2保留为对照组');
+    notices.push('<strong>情景收益：</strong>NO_EXIT=-15%/-100%按已结束组合（CLOSED+NO_EXIT）计算；Jito 0.01按买卖两笔各0.01 SOL计算，均不是实际成交保证');
     if(metric(d.excludedLegacyPriceEvents)>0)notices.push(`<strong>${d.excludedLegacyPriceEvents}</strong> 个旧价格解析事件已隔离，不参与任何策略统计`);
     if(metric(d.excludedOverMaxDropEvents)>0)notices.push(`<strong>${d.excludedOverMaxDropEvents}</strong> 个跌幅超过40%的RUG候选已排除`);
+    if(metric(d.abnormalRecoveryEvents)>0)notices.push(`<strong>${d.abnormalRecoveryEvents}</strong> 个恢复比例异常事件已从全部策略汇总中隔离，原始行仍保留审计`);
+    if(metric(sh.dataQualityQuarantined)>0)notices.push(`<strong>${sh.dataQualityQuarantined}</strong> 条异常成交额/储备/价格连续性组合已隔离`);
+    if(metric(sh.coverageHours)<23)notices.push(`<span class="warning">当前Shadow实际覆盖仅 ${fmt(sh.coverageHours,1)} 小时，不是完整24小时</span>`);
     if(metric(sh.resolvedEpisodes)<100)notices.push(`<span class="warning">Same-Slot Shadow独立已退出事件仅 ${sh.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
     if(metric(sh.largestWinnerEventContributionPct)>50)notices.push(`Shadow最大赢家事件贡献全部正收益的 <strong>${pct(sh.largestWinnerEventContributionPct)}</strong>`);
     if(metric(e.confirmationsWithoutSimulation)>0)notices.push(`<strong>${e.confirmationsWithoutSimulation}</strong> 个历史确认没有有效模拟记录`);

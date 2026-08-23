@@ -11,7 +11,14 @@ const { RuntimeHealthMonitor } = require('./core/RuntimeHealthMonitor');
 
 async function main() {
   validateConfig({ requireStream: true });
-  const store = new ResearchStore(config.storage);
+  const store = new ResearchStore({
+    ...config.storage,
+    sameSlotQuoteModel: config.sameSlotShadow.quoteModel,
+    sameSlotPrimaryProfileId: config.sameSlotShadow.primaryProfileId,
+    sameSlotNoExitScenarioLossPcts: config.sameSlotShadow.noExitScenarioLossPcts,
+    sameSlotJitoTipScenariosSol: config.sameSlotShadow.jitoTipScenariosSol,
+    maxReportedRecoveryPct: config.recovery.maxReportedRecoveryPct,
+  });
   const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
     'PUMPSWAP_CPMM_EVENT_FEES_V1',
     'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',

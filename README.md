@@ -17,14 +17,14 @@ Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有�
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
 4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
-5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1/#2 入场，使用1/2/5 SOL和100/250/500/1000/2000ms快速退出；所有结果强制标记为不可执行理论成交。
+5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；Rank #2再分为第一笔买单达到2 SOL的`R2-B2`核心组和`R2-BASE`对照组。使用1/2/5 SOL和100/250/500/1000/2000ms快速退出，所有结果强制标记为不可执行理论成交。
 6. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
 7. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
 8. **Recovery Execution Simulator**：作为对照组，分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。等待入场期间一旦出现二次砸盘，全部待入场组合立即取消；每个仓位还必须通过即时往返成本和双边流动性占用检查。
 
 程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
 9. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
-10. **Minimal Dashboard**：优先展示 Same-Slot Shadow收益组合、观察排名、链上交易位置和延迟分位数；后续 Slot 恢复仅作为对照组，并继续显示 Fill Rate、NO_EXIT、PF、独立事件和最大赢家事件贡献。
+10. **Minimal Dashboard**：优先展示`R2-B2`、Same-Slot链上排名和速度余量；后续 Slot 恢复仅作为对照组。页面同时显示 Fill Rate、NO_EXIT情景收益、Jito成本敏感性、PF、独立事件、实际覆盖时长和异常隔离数量。
 
 ## 两条研究线
 
@@ -33,18 +33,22 @@ Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有�
 Dashboard 的 `#1/#2` 表示砸盘后同 Slot 内已经上链的第1/第2笔严格排序买单。当前 LaserStream
 在交易执行后才提供事件，因此这些行只能测量竞争环境和本地观察延迟，不能声称本系统已经能够取得该排名。
 
-Same-Slot Shadow V1 同时建立两种反事实研究路径：
+Same-Slot Shadow V2 建立三种可区分的反事实研究路径：
 
-- `Rank #1`：以砸盘事件执行后的公开储备为理论入场状态。
-- `Rank #2`：只有观察到严格排序的第1笔真实买单后，才以该买单执行后的公开储备为理论入场状态。
+- `R1-RAW / Rank #1`：以砸盘事件执行后的公开储备为理论入场状态。
+- `R2-BASE / Rank #2`：观察到严格排序的第1笔真实买单后，以该买单执行后的公开储备为理论入场状态。
+- `R2-B2 / Rank #2`：与`R2-BASE`相同，但要求第一笔严格同Slot买单至少2 SOL；该条件在理论Rank #2入场前已经可观察，不使用未来信息。阈值可用`SDBR_RANK2_MIN_TRIGGER_BUY_SOL`调整。
 - 仓位固定为1/2/5 SOL，退出目标为入场后100/250/500/1000/2000ms。
 - 退出使用目标时点之后第一笔严格因果公开成交的储备报价；没有交易或没有可卖报价时分别记录`NO_EXIT`。
 - 每次入场都先检查即时买卖往返成本和双边流动性占用，并扣除AMM费用、滑点、基础费、Priority Fee与Jito Tip假设。
-- 默认速度预算为解析2ms、构建5ms、签名1ms、发送15ms；只用于和竞争买单的接收延迟计算理论余量，可通过`SDBR_SPEED_*_BUDGET_MS`调整。
+- 默认速度预算为解析2ms、构建5ms、签名1ms、发送15ms。Rank #1余量按“第一笔买单接收时间−砸盘接收时间−23ms”计算；Rank #2必须按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算，不能再把第二笔买单相对砸盘的累计延迟误当成可用时间。预算可通过`SDBR_SPEED_*_BUDGET_MS`调整。
+- `CLOSED均值`只统计真实取得退出报价的组合；Dashboard另列`NO_EXIT=-15%`与`NO_EXIT=-100%`，把无法退出纳入已结束组合的情景均值，避免只看成功退出样本造成幸存者偏差。
+- Jito敏感性默认测试每笔0/0.005/0.01/0.02 SOL，买入和卖出各计一次；这些只是假设成本，不代表获得指定链上排名。
+- 成交额、Quote Reserve、成交/储备比例、事件价格与储备价格偏差或相邻储备跳变超过安全阈值时，相关组合标记为`QUARANTINED`，保留审计记录但不进入收益排名。
 
 所有Shadow行都写入`infrastructure_executable=0`，并标记
 `POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE`。这个模型回答“如果能取得该排名，公开价格路径下收益如何”，
-不回答“现有LaserStream系统是否真的能取得该排名”。由于假设订单会改变池子状态，V1仍是公开储备路径近似，
+不回答“现有LaserStream系统是否真的能取得该排名”。由于假设订单会改变池子状态，V2仍是公开储备路径近似，
 不是完整的反事实链上重放。
 
 要把该方向变成可执行策略，需要单独的极速执行层：低延迟区块数据、预构建交易、Leader/Block Engine
@@ -100,6 +104,8 @@ Dump 分层：
 Priority Fee、Jito Tip 与基础交易费。入场前会在加入 Shadow 买单后的反事实储备上计算立即卖回的SOL，默认拒绝即时净往返损失超过8%、买入或卖出流动性占用超过10%的仓位。它是事件流可实现性研究模型，不是链上 SDK 的逐指令报价替代品。
 
 V1 曾把 5000 bps 的 Buyback 分配比例误当成 50% 额外交易费；V2 虽修正费用，却允许确认后的等待期出现二次砸盘后继续入场。旧事件解析没有把多Token交易中的Token Account精确映射到各自PumpSwap事件，可能产生1000倍级价格异常。当前解析版本会标记到每个砸盘事件；程序启动时会隔离旧解析事件并删除V1/V2/V3派生模拟，避免它们继续污染恢复率、Same-Slot反弹和收益统计。旧行不会自动物理删除。
+
+Same-Slot公开储备路径使用独立版本`PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V2`。统计接口只汇总当前版本；恢复比例超过上限的事件及异常成交/储备连续性组合会从砸盘、确认、Same-Slot和后续Slot收益汇总中统一隔离并单独计数。原始行和旧Same-Slot行仍留在SQLite供审计，但不会与V2收益混合。
 
 卖前价格优先使用 5 秒内最后一笔公开储备价格；缺失时才用 SellEvent 的卖后储备重建，并把来源写入数据库。
 Token精度通过事件中的`user_base_token_account`映射到该账户自己的Token Balance。多Token交易无法完成账户映射时，
@@ -190,7 +196,7 @@ node scripts/compact-event-window-db.js \
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、生存率和二次砸盘。
 - `confirmations`：R1/R2/LQ 的确认时点与全部恢复特征。
 - `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额和接收延迟。
-- `same_slot_shadow_simulations`：理论Rank #1/#2入场、速度预算、容量检查、快速退出和扣费收益。
+- `same_slot_shadow_simulations`：理论Rank #1/#2入场、`R1-RAW/R2-BASE/R2-B2`分组、第一笔买单金额、正确的两买单间隔、速度余量、数据质量状态、容量检查、快速退出和扣费收益。
 - `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
@@ -214,4 +220,4 @@ pnpm test
 
 测试覆盖有效储备、signed virtual reserve、逐笔费用、Token 精度、严格/相关 Slot 标签、
 Same-Slot Rank #1/#2 Shadow、100–2000ms快速退出、Creator 拒绝、多钱包恢复、延迟入场、
-延迟退出、SQLite 批量写入和 `NO_EXIT` 独立统计。
+延迟退出、Rank #2两买单间隔、`R2-B2`分组、异常储备隔离、NO_EXIT/Jito情景收益、SQLite批量写入和`NO_EXIT`独立统计。

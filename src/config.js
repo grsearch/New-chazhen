@@ -31,6 +31,19 @@ function boolean(name, fallback) {
   throw new Error(`${name} must be true or false`);
 }
 
+function numberList(name, fallback, bounds = {}) {
+  const raw = process.env[name];
+  if (!raw) return [...fallback];
+  return [...new Set(raw.split(',').map((item) => {
+    const value = Number(item.trim());
+    if (!Number.isFinite(value)
+      || value < (bounds.min ?? -Infinity) || value > (bounds.max ?? Infinity)) {
+      throw new Error(`${name} contains an invalid number: ${item}`);
+    }
+    return value;
+  }))];
+}
+
 const positionSizesSol = [1, 2, 5];
 const maxDumpDropPct = number('SDBR_MAX_DUMP_DROP_PCT', 40, { min: 1, max: 99 });
 
@@ -116,6 +129,9 @@ const config = {
     secondDumpFractionOfInitial: 0.2,
     secondDumpMinPriceDropPct: 8,
     buyerStallMs: 1_000,
+    maxReportedRecoveryPct: number('SDBR_MAX_REPORTED_RECOVERY_PCT', 500, {
+      min: 100, max: 10_000,
+    }),
     profiles: [
       {
         id: 'PD-R1', maxSlotDelta: 4, minPriceBouncePct: 5,
@@ -139,11 +155,13 @@ const config = {
   sameSlotShadow: {
     enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', true),
     targetRanks: [1, 2],
+    primaryProfileId: 'R2-B2',
+    minRank2TriggerBuySol: number('SDBR_RANK2_MIN_TRIGGER_BUY_SOL', 2, { min: 0.01 }),
     positionSizesSol,
     exitHorizonsMs: [100, 250, 500, 1_000, 2_000],
     exitTimeoutMs: integer('SDBR_SAME_SLOT_EXIT_TIMEOUT_MS', 2_000, { min: 100 }),
     episodeRetentionMs: integer('SDBR_SAME_SLOT_RETENTION_MS', 5_000, { min: 2_000 }),
-    quoteModel: 'PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V1',
+    quoteModel: 'PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V2',
     buySlippageBps: number('SDBR_BUY_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     sellSlippageBps: number('SDBR_SELL_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
     maxImmediateRoundTripLossPct: number('SDBR_MAX_ROUND_TRIP_LOSS_PCT', 8, { min: 0, max: 100 }),
@@ -152,6 +170,23 @@ const config = {
     baseTxFeeSol: number('SDBR_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),
     priorityFeeSol: number('SDBR_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
     jitoTipSol: number('SDBR_JITO_TIP_SOL', 0, { min: 0 }),
+    jitoTipScenariosSol: numberList('SDBR_JITO_TIP_SCENARIOS_SOL', [0, 0.005, 0.01, 0.02], {
+      min: 0, max: 10,
+    }),
+    noExitScenarioLossPcts: numberList('SDBR_NO_EXIT_SCENARIO_LOSS_PCTS', [-15, -100], {
+      min: -100, max: 0,
+    }),
+    maxTradeSol: number('SDBR_DATA_MAX_TRADE_SOL', 1_000, { min: 1 }),
+    maxQuoteReserveSol: number('SDBR_DATA_MAX_QUOTE_RESERVE_SOL', 10_000, { min: 20 }),
+    maxTradeToQuotePct: number('SDBR_DATA_MAX_TRADE_TO_QUOTE_PCT', 50, {
+      min: 1, max: 1_000,
+    }),
+    maxEventReservePriceDeviationPct: number(
+      'SDBR_DATA_MAX_EVENT_RESERVE_DEVIATION_PCT', 100, { min: 1, max: 10_000 },
+    ),
+    maxQuoteReserveChangeMultiple: number(
+      'SDBR_DATA_MAX_QUOTE_RESERVE_CHANGE_MULTIPLE', 5, { min: 1.1, max: 1_000 },
+    ),
     parseBudgetMs: number('SDBR_SPEED_PARSE_BUDGET_MS', 2, { min: 0 }),
     buildBudgetMs: number('SDBR_SPEED_BUILD_BUDGET_MS', 5, { min: 0 }),
     signBudgetMs: number('SDBR_SPEED_SIGN_BUDGET_MS', 1, { min: 0 }),
