@@ -155,11 +155,17 @@ const config = {
   sameSlotShadow: {
     enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', true),
     targetRanks: [1, 2],
-    primaryProfileId: 'R2-B2',
+    primaryProfileId: 'R2-B5',
+    primaryCohortStage: 'HOLDOUT_B5_V1',
     minRank2TriggerBuySol: number('SDBR_RANK2_MIN_TRIGGER_BUY_SOL', 2, { min: 0.01 }),
+    strongRank2TriggerBuySol: number('SDBR_RANK2_STRONG_TRIGGER_BUY_SOL', 5, { min: 0.01 }),
     positionSizesSol,
-    exitHorizonsMs: [100, 250, 500, 1_000, 2_000],
+    exitHorizonsMs: [100, 250, 500],
     exitTimeoutMs: integer('SDBR_SAME_SLOT_EXIT_TIMEOUT_MS', 2_000, { min: 100 }),
+    rescueHorizonsMs: numberList('SDBR_SAME_SLOT_RESCUE_HORIZONS_MS', [5_000, 10_000], {
+      min: 1_000, max: 60_000,
+    }).sort((left, right) => left - right),
+    rescueTimeoutMs: integer('SDBR_SAME_SLOT_RESCUE_TIMEOUT_MS', 2_000, { min: 100 }),
     episodeRetentionMs: integer('SDBR_SAME_SLOT_RETENTION_MS', 5_000, { min: 2_000 }),
     quoteModel: 'PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V2',
     buySlippageBps: number('SDBR_BUY_SLIPPAGE_BPS', 100, { min: 0, max: 5_000 }),
@@ -234,6 +240,10 @@ function validateConfig({ requireStream = true } = {}) {
   if (requireStream && config.stream.endpoints.length === 0) errors.push('SDBR_GRPC_ENDPOINTS is required');
   if (!config.execution.positionSizesSol.length) errors.push('at least one position size is required');
   if (!config.sameSlotShadow.positionSizesSol.length) errors.push('at least one Same-Slot position size is required');
+  if (config.sameSlotShadow.strongRank2TriggerBuySol
+    <= config.sameSlotShadow.minRank2TriggerBuySol) {
+    errors.push('SDBR_RANK2_STRONG_TRIGGER_BUY_SOL must exceed SDBR_RANK2_MIN_TRIGGER_BUY_SOL');
+  }
   if (!config.dump.profiles.length) errors.push('at least one dump profile is required');
   if (!config.recovery.profiles.length) errors.push('at least one recovery profile is required');
   if (errors.length) throw new Error(`Invalid configuration:\n- ${errors.join('\n- ')}`);

@@ -15,6 +15,8 @@ async function main() {
     ...config.storage,
     sameSlotQuoteModel: config.sameSlotShadow.quoteModel,
     sameSlotPrimaryProfileId: config.sameSlotShadow.primaryProfileId,
+    sameSlotPrimaryCohortStage: config.sameSlotShadow.primaryCohortStage,
+    sameSlotStrongTriggerBuySol: config.sameSlotShadow.strongRank2TriggerBuySol,
     sameSlotNoExitScenarioLossPcts: config.sameSlotShadow.noExitScenarioLossPcts,
     sameSlotJitoTipScenariosSol: config.sameSlotShadow.jitoTipScenariosSol,
     maxReportedRecoveryPct: config.recovery.maxReportedRecoveryPct,

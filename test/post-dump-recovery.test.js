@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PostDumpRecoveryEngine } = require('../src/core/PostDumpRecoveryEngine');
+const { SameSlotShadowSimulator } = require('../src/core/SameSlotShadowSimulator');
 
 class MemoryStore {
   constructor() {
@@ -59,7 +60,9 @@ function configuration() {
       maxEntryLiquidityUsagePct: 100, maxExitLiquidityUsagePct: 100,
       baseTxFeeSol: 0, priorityFeeSol: 0, jitoTipSol: 0,
       parseBudgetMs: 2, buildBudgetMs: 5, signBudgetMs: 1, sendBudgetMs: 15,
-      minRank2TriggerBuySol: 2,
+      primaryProfileId: 'R2-B5', primaryCohortStage: 'HOLDOUT_B5_V1',
+      minRank2TriggerBuySol: 2, strongRank2TriggerBuySol: 5,
+      rescueHorizonsMs: [5_000, 10_000], rescueTimeoutMs: 2_000,
       maxTradeSol: 1_000, maxQuoteReserveSol: 10_000, maxTradeToQuotePct: 50,
       maxEventReservePriceDeviationPct: 100, maxQuoteReserveChangeMultiple: 5,
     },
@@ -133,7 +136,8 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
   assert.equal(rank2.status, 'CLOSED');
   assert.equal(rank2.exitHorizonMs, 100);
-  assert.equal(rank2.entryProfileId, 'R2-B2');
+  assert.equal(rank2.entryProfileId, 'R2-B5');
+  assert.equal(rank2.cohortStage, 'HOLDOUT_B5_V1');
   assert.equal(rank2.triggerBuySol, 10);
   assert.equal(store.sameSlotObservations.length, 1, 'next-slot buys are not probe observations');
   observe(trade({ at: base + 250, slot: 502, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 5 }));
@@ -246,6 +250,84 @@ test('Same-Slot Shadow assigns rank from chain order instead of receive order', 
   assert.equal(rank1.competitorReceiveLagMs, 60, 'rank 1 follows transactionIndex, not arrival');
   assert.equal(rank1.competitorGapMs, 60);
   assert.equal(rank1.competitorHeadroomMs, 37);
+});
+
+test('R2-B5 fast exits fall back to the 5 second rescue quote before NO_EXIT', () => {
+  const base = 1_800_047_500_000;
+  let now = base;
+  const config = configuration();
+  config.sameSlotShadow.exitHorizonsMs = [500];
+  const store = new MemoryStore();
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => now });
+  const observe = (row) => { now = row.receivedAtMs; return engine.observe(row); };
+
+  observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 121,
+  }));
+  observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 20,
+    price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 122,
+  }));
+  observe(trade({
+    at: base + 100, slot: 2, tx: 2, side: 'BUY', sol: 6,
+    price: 7.5e-8, wallet: 'strong-trigger', quoteSol: 75, sequence: 123,
+  }));
+  observe(trade({
+    at: base + 200, slot: 3, tx: 1, side: 'BUY', sol: 0.1,
+    price: 7.6e-8, wallet: 'slot-boundary', quoteSol: 76, sequence: 124,
+  }));
+
+  let rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
+  assert.equal(rank2.entryProfileId, 'R2-B5');
+  assert.equal(rank2.status, 'PENDING_EXIT');
+  now = base + 2_700;
+  engine.advanceTime(now);
+  rank2 = store.sameSlotShadows.get(rank2.shadowId);
+  assert.equal(rank2.exitPhase, 'RESCUE_5000');
+  assert.equal(rank2.primaryNoExitReason, 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON');
+
+  observe(trade({
+    at: base + 4_000, slot: 4, tx: 1, side: 'BUY', sol: 0.1,
+    price: 7.8e-8, wallet: 'too-early-for-rescue', quoteSol: 78, sequence: 125,
+  }));
+  assert.equal(store.sameSlotShadows.get(rank2.shadowId).status, 'PENDING_EXIT');
+  observe(trade({
+    at: base + 5_200, slot: 5, tx: 1, side: 'BUY', sol: 0.1,
+    price: 8e-8, wallet: 'rescue-quote', quoteSol: 80, sequence: 126,
+  }));
+  rank2 = store.sameSlotShadows.get(rank2.shadowId);
+  assert.equal(rank2.status, 'CLOSED');
+  assert.equal(rank2.exitReason, 'RESCUE_5000');
+  assert.equal(rank2.rescueHorizonMs, 5_000);
+  assert.deepEqual(rank2.rescueAttemptedHorizons, [5_000]);
+});
+
+test('Same-Slot rescue exhausts 5 and 10 second windows before final NO_EXIT', () => {
+  const base = 1_800_047_800_000;
+  const store = new MemoryStore();
+  const simulator = new SameSlotShadowSimulator({
+    config: configuration().sameSlotShadow, store, now: () => base,
+  });
+  const simulation = {
+    shadowId: 'rescue-exhausted', episodeId: 'episode', status: 'PENDING_EXIT',
+    entryAtMs: base, requestedExitAtMs: base + 500, exitDeadlineAtMs: base + 2_500,
+    activeExitTargetAtMs: base + 500, activeExitDeadlineAtMs: base + 2_500,
+    exitPhase: 'PRIMARY', activeRescueHorizonMs: null, rescueAttemptedHorizons: [],
+    postHorizonTrades: 0, dump: { pool: 'pool', mint: 'mint' }, updatedAtMs: base,
+  };
+  simulator.simulations.set(simulation.shadowId, simulation);
+  simulator.simulationsByPool.set('pool', new Set([simulation.shadowId]));
+
+  simulator.advanceTime(base + 2_600);
+  assert.equal(simulation.exitPhase, 'RESCUE_5000');
+  simulator.advanceTime(base + 7_100);
+  assert.equal(simulation.exitPhase, 'RESCUE_10000');
+  simulator.advanceTime(base + 12_100);
+  assert.equal(simulation.status, 'NO_EXIT');
+  assert.equal(simulation.exitReason, 'RESCUE_EXHAUSTED');
+  assert.deepEqual(simulation.rescueAttemptedHorizons, [5_000, 10_000]);
+  assert.equal(simulator.health().rescueUnresolved, 1);
 });
 
 test('Same-Slot Shadow quarantines discontinuous reserve data from strategy returns', () => {

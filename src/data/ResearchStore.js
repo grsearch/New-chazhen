@@ -56,6 +56,7 @@ function returnStats(rows) {
 
 function shadowScenarioStats({
   closedRows, noExit, noExitLossPcts = [-15, -100], jitoTipScenariosSol = [],
+  positionSol = null, modeledTipSol = null,
 }) {
   const rows = closedRows.filter((row) => Number.isFinite(number(row.net_return_pct)));
   const closedReturnSum = rows.reduce((sum, row) => sum + number(row.net_return_pct), 0);
@@ -78,7 +79,24 @@ function shadowScenarioStats({
         ? adjusted.reduce((sum, value) => sum + value, 0) / adjusted.length : null,
     };
   });
-  return { noExitScenarios, jitoTipScenarios };
+  const normalizedPositionSol = number(positionSol);
+  const normalizedModeledTipSol = Math.max(0, number(modeledTipSol)
+    ?? (rows.length ? number(rows[0].modeled_jito_tip_sol) : 0) ?? 0);
+  const combinedScenarios = normalizedPositionSol > 0
+    ? noExitLossPcts.flatMap((lossPct) => jitoTipScenariosSol.map((tipSol) => {
+      const jitoCostPct = (tipSol - normalizedModeledTipSol)
+        * 2 / normalizedPositionSol * 100;
+      const adjustedClosedSum = rows.reduce(
+        (sum, row) => sum + number(row.net_return_pct) - jitoCostPct, 0,
+      );
+      return {
+        noExitLossPct: lossPct,
+        tipSol,
+        averageNetReturnPct: resolved
+          ? (adjustedClosedSum + noExit * (lossPct - jitoCostPct)) / resolved : null,
+      };
+    })) : [];
+  return { noExitScenarios, jitoTipScenarios, combinedScenarios };
 }
 
 function eventConcentrationStats(rows) {
@@ -138,7 +156,9 @@ class ResearchStore {
       maxDumpDropPct: 40,
       acceptedDumpParseVersion: null,
       sameSlotQuoteModel: null,
-      sameSlotPrimaryProfileId: 'R2-B2',
+      sameSlotPrimaryProfileId: 'R2-B5',
+      sameSlotPrimaryCohortStage: 'HOLDOUT_B5_V1',
+      sameSlotStrongTriggerBuySol: 5,
       sameSlotNoExitScenarioLossPcts: [-15, -100],
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
       maxReportedRecoveryPct: 500,
@@ -181,7 +201,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '8')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '9')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -360,6 +380,7 @@ class ResearchStore {
         episode_id TEXT NOT NULL REFERENCES dump_events(episode_id),
         target_rank INTEGER NOT NULL,
         entry_profile_id TEXT NOT NULL DEFAULT 'LEGACY',
+        cohort_stage TEXT NOT NULL DEFAULT 'LEGACY',
         position_sol REAL NOT NULL,
         exit_horizon_ms INTEGER NOT NULL,
         quote_model TEXT NOT NULL,
@@ -407,6 +428,14 @@ class ResearchStore {
         modeled_jito_tip_sol REAL DEFAULT 0,
         requested_exit_at_ms INTEGER,
         exit_deadline_at_ms INTEGER,
+        active_exit_target_at_ms INTEGER,
+        active_exit_deadline_at_ms INTEGER,
+        exit_phase TEXT NOT NULL DEFAULT 'PRIMARY',
+        active_rescue_horizon_ms INTEGER,
+        rescue_horizon_ms INTEGER,
+        rescue_attempted_horizons_json TEXT,
+        primary_no_exit_reason TEXT,
+        exit_reason TEXT,
         post_horizon_trades INTEGER NOT NULL DEFAULT 0,
         exit_at_ms INTEGER,
         exit_slot INTEGER,
@@ -525,6 +554,8 @@ class ResearchStore {
     this._ensureColumn('dump_events', 'parse_version', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'entry_profile_id',
       "TEXT NOT NULL DEFAULT 'LEGACY'");
+    this._ensureColumn('same_slot_shadow_simulations', 'cohort_stage',
+      "TEXT NOT NULL DEFAULT 'LEGACY'");
     this._ensureColumn('same_slot_shadow_simulations', 'latency_model',
       "TEXT NOT NULL DEFAULT 'LEGACY_DUMP_TO_COMPETITOR'");
     this._ensureColumn('same_slot_shadow_simulations', 'competitor_reference_at_ms', 'INTEGER');
@@ -536,6 +567,20 @@ class ResearchStore {
       "TEXT NOT NULL DEFAULT 'UNASSESSED'");
     this._ensureColumn('same_slot_shadow_simulations', 'data_quality_reasons_json', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'modeled_jito_tip_sol', 'REAL DEFAULT 0');
+    this._ensureColumn('same_slot_shadow_simulations', 'active_exit_target_at_ms', 'INTEGER');
+    this._ensureColumn('same_slot_shadow_simulations', 'active_exit_deadline_at_ms', 'INTEGER');
+    this._ensureColumn('same_slot_shadow_simulations', 'exit_phase',
+      "TEXT NOT NULL DEFAULT 'PRIMARY'");
+    this._ensureColumn('same_slot_shadow_simulations', 'active_rescue_horizon_ms', 'INTEGER');
+    this._ensureColumn('same_slot_shadow_simulations', 'rescue_horizon_ms', 'INTEGER');
+    this._ensureColumn('same_slot_shadow_simulations', 'rescue_attempted_horizons_json', 'TEXT');
+    this._ensureColumn('same_slot_shadow_simulations', 'primary_no_exit_reason', 'TEXT');
+    this._ensureColumn('same_slot_shadow_simulations', 'exit_reason', 'TEXT');
+    this.db.prepare(`
+      UPDATE same_slot_shadow_simulations
+      SET entry_profile_id='R2-B5',cohort_stage='DISCOVERY_RECLASSIFIED_20260824'
+      WHERE target_rank=2 AND entry_profile_id='R2-B2' AND trigger_buy_sol>=?
+    `).run(this.config.sameSlotStrongTriggerBuySol);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_same_slot_shadow_profile_cohort
         ON same_slot_shadow_simulations(
@@ -664,7 +709,8 @@ class ResearchStore {
       `),
       sameSlotShadow: this.db.prepare(`
         INSERT INTO same_slot_shadow_simulations (
-          shadow_id,episode_id,target_rank,entry_profile_id,position_sol,exit_horizon_ms,quote_model,
+          shadow_id,episode_id,target_rank,entry_profile_id,cohort_stage,position_sol,
+          exit_horizon_ms,quote_model,
           status,rejection_reason,infrastructure_mode,infrastructure_executable,
           infrastructure_reason,parse_budget_ms,build_budget_ms,sign_budget_ms,
           send_budget_ms,response_budget_ms,latency_model,competitor_observed_at_ms,
@@ -677,13 +723,17 @@ class ResearchStore {
           entry_total_fee_bps,entry_liquidity_usage_pct,
           entry_capacity_round_trip_loss_pct,entry_capacity_exit_liquidity_usage_pct,
           token_units,entry_reserve_source,entry_fee_sol,exit_fee_sol,modeled_jito_tip_sol,
-          requested_exit_at_ms,exit_deadline_at_ms,post_horizon_trades,exit_at_ms,
+          requested_exit_at_ms,exit_deadline_at_ms,active_exit_target_at_ms,
+          active_exit_deadline_at_ms,exit_phase,active_rescue_horizon_ms,rescue_horizon_ms,
+          rescue_attempted_horizons_json,primary_no_exit_reason,exit_reason,
+          post_horizon_trades,exit_at_ms,
           exit_slot,exit_signature,exit_quote_lag_ms,exit_price,exit_market_price,
           exit_impact_pct,exit_total_fee_bps,exit_liquidity_usage_pct,exit_reserve_source,
           proceeds_sol,total_cost_sol,gross_return_pct,net_return_pct,hold_ms,
           created_at_ms,updated_at_ms
         ) VALUES (
-          @shadowId,@episodeId,@targetRank,@entryProfileId,@positionSol,@exitHorizonMs,@quoteModel,
+          @shadowId,@episodeId,@targetRank,@entryProfileId,@cohortStage,@positionSol,
+          @exitHorizonMs,@quoteModel,
           @status,@rejectionReason,@infrastructureMode,@infrastructureExecutable,
           @infrastructureReason,@parseBudgetMs,@buildBudgetMs,@signBudgetMs,
           @sendBudgetMs,@responseBudgetMs,@latencyModel,@competitorObservedAtMs,
@@ -696,7 +746,10 @@ class ResearchStore {
           @entryTotalFeeBps,@entryLiquidityUsagePct,
           @entryCapacityRoundTripLossPct,@entryCapacityExitLiquidityUsagePct,
           @tokenUnits,@entryReserveSource,@entryFeeSol,@exitFeeSol,@modeledJitoTipSol,
-          @requestedExitAtMs,@exitDeadlineAtMs,@postHorizonTrades,@exitAtMs,
+          @requestedExitAtMs,@exitDeadlineAtMs,@activeExitTargetAtMs,
+          @activeExitDeadlineAtMs,@exitPhase,@activeRescueHorizonMs,@rescueHorizonMs,
+          @rescueAttemptedHorizonsJson,@primaryNoExitReason,@exitReason,
+          @postHorizonTrades,@exitAtMs,
           @exitSlot,@exitSignature,@exitQuoteLagMs,@exitPrice,@exitMarketPrice,
           @exitImpactPct,@exitTotalFeeBps,@exitLiquidityUsagePct,@exitReserveSource,
           @proceedsSol,@totalCostSol,@grossReturnPct,@netReturnPct,@holdMs,
@@ -704,6 +757,7 @@ class ResearchStore {
         ) ON CONFLICT(shadow_id) DO UPDATE SET
           status=excluded.status,rejection_reason=excluded.rejection_reason,
           entry_profile_id=excluded.entry_profile_id,
+          cohort_stage=excluded.cohort_stage,
           latency_model=excluded.latency_model,
           competitor_observed_at_ms=excluded.competitor_observed_at_ms,
           competitor_receive_lag_ms=excluded.competitor_receive_lag_ms,
@@ -716,6 +770,16 @@ class ResearchStore {
           data_quality_status=excluded.data_quality_status,
           data_quality_reasons_json=excluded.data_quality_reasons_json,
           modeled_jito_tip_sol=excluded.modeled_jito_tip_sol,
+          requested_exit_at_ms=excluded.requested_exit_at_ms,
+          exit_deadline_at_ms=excluded.exit_deadline_at_ms,
+          active_exit_target_at_ms=excluded.active_exit_target_at_ms,
+          active_exit_deadline_at_ms=excluded.active_exit_deadline_at_ms,
+          exit_phase=excluded.exit_phase,
+          active_rescue_horizon_ms=excluded.active_rescue_horizon_ms,
+          rescue_horizon_ms=excluded.rescue_horizon_ms,
+          rescue_attempted_horizons_json=excluded.rescue_attempted_horizons_json,
+          primary_no_exit_reason=excluded.primary_no_exit_reason,
+          exit_reason=excluded.exit_reason,
           post_horizon_trades=excluded.post_horizon_trades,
           exit_at_ms=excluded.exit_at_ms,exit_slot=excluded.exit_slot,
           exit_signature=excluded.exit_signature,exit_quote_lag_ms=excluded.exit_quote_lag_ms,
@@ -928,7 +992,8 @@ class ResearchStore {
 
   _upsertSameSlotShadow(row) {
     const fields = [
-      'shadowId','episodeId','targetRank','entryProfileId','positionSol','exitHorizonMs','quoteModel',
+      'shadowId','episodeId','targetRank','entryProfileId','cohortStage','positionSol',
+      'exitHorizonMs','quoteModel',
       'status','rejectionReason','infrastructureMode','infrastructureReason',
       'parseBudgetMs','buildBudgetMs','signBudgetMs','sendBudgetMs','responseBudgetMs',
       'latencyModel','competitorObservedAtMs','competitorReceiveLagMs',
@@ -940,7 +1005,8 @@ class ResearchStore {
       'entryMarketPrice','entryImpactPct','entryTotalFeeBps','entryLiquidityUsagePct',
       'entryCapacityRoundTripLossPct','entryCapacityExitLiquidityUsagePct','tokenUnits',
       'entryReserveSource','entryFeeSol','exitFeeSol','modeledJitoTipSol',
-      'requestedExitAtMs','exitDeadlineAtMs',
+      'requestedExitAtMs','exitDeadlineAtMs','activeExitTargetAtMs','activeExitDeadlineAtMs',
+      'exitPhase','activeRescueHorizonMs','rescueHorizonMs','primaryNoExitReason','exitReason',
       'postHorizonTrades','exitAtMs','exitSlot','exitSignature','exitQuoteLagMs','exitPrice',
       'exitMarketPrice','exitImpactPct','exitTotalFeeBps','exitLiquidityUsagePct',
       'exitReserveSource','proceedsSol','totalCostSol','grossReturnPct','netReturnPct','holdMs',
@@ -949,9 +1015,12 @@ class ResearchStore {
     const params = {};
     for (const field of fields) params[field] = value(row[field]);
     params.entryProfileId = row.entryProfileId || 'LEGACY';
+    params.cohortStage = row.cohortStage || 'LEGACY';
     params.latencyModel = row.latencyModel || 'LEGACY_DUMP_TO_COMPETITOR';
     params.dataQualityStatus = row.dataQualityStatus || 'UNASSESSED';
     params.dataQualityReasonsJson = json(row.dataQualityReasons);
+    params.rescueAttemptedHorizonsJson = json(row.rescueAttemptedHorizons || []);
+    params.exitPhase = row.exitPhase || 'PRIMARY';
     params.modeledJitoTipSol = number(row.modeledJitoTipSol) || 0;
     params.infrastructureExecutable = 0;
     params.postHorizonTrades = number(row.postHorizonTrades) || 0;
@@ -1216,13 +1285,43 @@ class ResearchStore {
           AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
           THEN s.episode_id END) rank_2_episodes,
         COUNT(DISTINCT CASE WHEN s.entry_profile_id=?
+          AND s.cohort_stage=?
           AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
           THEN s.episode_id END) primary_profile_episodes,
+        COUNT(DISTINCT CASE WHEN s.entry_profile_id=?
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+          THEN s.episode_id END) primary_profile_all_episodes,
         COUNT(DISTINCT CASE WHEN s.target_rank=2 AND s.competitor_gap_ms IS NOT NULL
-          AND s.competitor_gap_ms>s.response_budget_ms THEN s.episode_id END)
+          AND s.competitor_gap_ms>s.response_budget_ms
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+          THEN s.episode_id END)
           rank_2_positive_headroom,
         COUNT(DISTINCT CASE WHEN s.target_rank=2 AND s.competitor_gap_ms IS NOT NULL
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
           THEN s.episode_id END) rank_2_headroom_samples,
+        COUNT(DISTINCT CASE WHEN s.entry_profile_id=? AND s.cohort_stage=?
+          AND s.competitor_gap_ms IS NOT NULL
+          AND s.competitor_gap_ms>s.response_budget_ms
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+          THEN s.episode_id END)
+          primary_positive_headroom,
+        COUNT(DISTINCT CASE WHEN s.entry_profile_id=? AND s.cohort_stage=?
+          AND s.competitor_gap_ms IS NOT NULL
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+          THEN s.episode_id END)
+          primary_headroom_samples,
+        SUM(CASE WHEN s.status='CLOSED' AND s.exit_reason LIKE 'RESCUE_%'
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED' THEN 1 ELSE 0 END)
+          rescue_exit_filled,
+        SUM(CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=5000
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED' THEN 1 ELSE 0 END)
+          rescue_5s_filled,
+        SUM(CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=10000
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED' THEN 1 ELSE 0 END)
+          rescue_10s_filled,
+        SUM(CASE WHEN s.status='NO_EXIT' AND s.exit_reason='RESCUE_EXHAUSTED'
+          AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED' THEN 1 ELSE 0 END)
+          rescue_unresolved,
         MIN(CASE WHEN COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
           THEN s.created_at_ms END) first_created_at_ms,
         MAX(CASE WHEN COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
@@ -1233,7 +1332,11 @@ class ResearchStore {
         AND (? IS NULL OR d.parse_version=?)
         AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
         AND (? IS NULL OR s.quote_model=?)
-    `).get(this.config.sameSlotPrimaryProfileId, this.config.maxDumpDropPct,
+    `).get(this.config.sameSlotPrimaryProfileId, this.config.sameSlotPrimaryCohortStage,
+      this.config.sameSlotPrimaryProfileId,
+      this.config.sameSlotPrimaryProfileId, this.config.sameSlotPrimaryCohortStage,
+      this.config.sameSlotPrimaryProfileId, this.config.sameSlotPrimaryCohortStage,
+      this.config.maxDumpDropPct,
       acceptedVersion, acceptedVersion, this.config.maxReportedRecoveryPct,
       shadowModel, shadowModel);
     const sameSlotShadowReturns = this.db.prepare(`
@@ -1350,11 +1453,25 @@ class ResearchStore {
         rank1Episodes: sameSlotShadowCounts.rank_1_episodes || 0,
         rank2Episodes: sameSlotShadowCounts.rank_2_episodes || 0,
         primaryProfileId: this.config.sameSlotPrimaryProfileId,
+        primaryCohortStage: this.config.sameSlotPrimaryCohortStage,
         primaryProfileEpisodes: sameSlotShadowCounts.primary_profile_episodes || 0,
+        primaryProfileAllEpisodes: sameSlotShadowCounts.primary_profile_all_episodes || 0,
         rank2PositiveHeadroomPct: sameSlotShadowCounts.rank_2_headroom_samples
           ? sameSlotShadowCounts.rank_2_positive_headroom
             / sameSlotShadowCounts.rank_2_headroom_samples * 100 : null,
         rank2HeadroomSamples: sameSlotShadowCounts.rank_2_headroom_samples || 0,
+        primaryPositiveHeadroomPctObserved: sameSlotShadowCounts.primary_headroom_samples
+          ? sameSlotShadowCounts.primary_positive_headroom
+            / sameSlotShadowCounts.primary_headroom_samples * 100 : null,
+        primaryPositiveHeadroomPctOfEpisodes: sameSlotShadowCounts.primary_profile_episodes
+          ? sameSlotShadowCounts.primary_positive_headroom
+            / sameSlotShadowCounts.primary_profile_episodes * 100 : null,
+        primaryPositiveHeadroom: sameSlotShadowCounts.primary_positive_headroom || 0,
+        primaryHeadroomSamples: sameSlotShadowCounts.primary_headroom_samples || 0,
+        rescueExitFilled: sameSlotShadowCounts.rescue_exit_filled || 0,
+        rescue5sFilled: sameSlotShadowCounts.rescue_5s_filled || 0,
+        rescue10sFilled: sameSlotShadowCounts.rescue_10s_filled || 0,
+        rescueUnresolved: sameSlotShadowCounts.rescue_unresolved || 0,
         coverageHours: sameSlotShadowCounts.first_created_at_ms != null
           && sameSlotShadowCounts.last_updated_at_ms != null
           ? (sameSlotShadowCounts.last_updated_at_ms
@@ -1489,9 +1606,11 @@ class ResearchStore {
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     const shadowModel = this.config.sameSlotQuoteModel;
     const groups = this.db.prepare(`
-      SELECT s.quote_model,s.target_rank,s.entry_profile_id,s.position_sol,s.exit_horizon_ms,
+      SELECT s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
+        s.position_sol,s.exit_horizon_ms,
         AVG(s.trigger_buy_sol) average_trigger_buy_sol,
         AVG(s.trigger_buy_to_dump_pct) average_trigger_buy_to_dump_pct,
+        AVG(s.modeled_jito_tip_sol) modeled_jito_tip_sol,
         COUNT(*) scheduled,
         SUM(CASE WHEN s.status<>'NO_ENTRY' THEN 1 ELSE 0 END) entry_filled,
         SUM(CASE WHEN s.status='CLOSED' THEN 1 ELSE 0 END) exit_filled,
@@ -1507,7 +1626,15 @@ class ResearchStore {
           insufficient_round_trip_liquidity,
         SUM(CASE WHEN s.status='NO_ENTRY'
           AND s.rejection_reason='ROUND_TRIP_COST_TOO_HIGH' THEN 1 ELSE 0 END)
-          round_trip_cost_too_high
+          round_trip_cost_too_high,
+        SUM(CASE WHEN s.status='CLOSED' AND s.exit_reason LIKE 'RESCUE_%'
+          THEN 1 ELSE 0 END) rescue_exit_filled,
+        SUM(CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=5000
+          THEN 1 ELSE 0 END) rescue_5s_filled,
+        SUM(CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=10000
+          THEN 1 ELSE 0 END) rescue_10s_filled,
+        SUM(CASE WHEN s.status='NO_EXIT' AND s.exit_reason='RESCUE_EXHAUSTED'
+          THEN 1 ELSE 0 END) rescue_unresolved
       FROM same_slot_shadow_simulations s
       JOIN dump_events d ON d.episode_id=s.episode_id
       WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
@@ -1515,11 +1642,12 @@ class ResearchStore {
         AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
         AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
         AND (? IS NULL OR s.quote_model=?)
-      GROUP BY s.quote_model,s.target_rank,s.entry_profile_id,s.position_sol,s.exit_horizon_ms
+      GROUP BY s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
+        s.position_sol,s.exit_horizon_ms
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       this.config.maxReportedRecoveryPct, shadowModel, shadowModel);
     const returns = this.db.prepare(`
-      SELECT s.episode_id episodeId,s.quote_model,s.target_rank,s.entry_profile_id,
+      SELECT s.episode_id episodeId,s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
         s.position_sol,s.exit_horizon_ms,s.modeled_jito_tip_sol,s.net_return_pct
       FROM same_slot_shadow_simulations s
       JOIN dump_events d ON d.episode_id=s.episode_id
@@ -1534,12 +1662,14 @@ class ResearchStore {
       const rows = returns.filter((row) => row.quote_model === group.quote_model
         && row.target_rank === group.target_rank
         && row.entry_profile_id === group.entry_profile_id
+        && row.cohort_stage === group.cohort_stage
         && row.position_sol === group.position_sol
         && row.exit_horizon_ms === group.exit_horizon_ms);
       return {
         quoteModel: group.quote_model,
         targetRank: group.target_rank,
         entryProfileId: group.entry_profile_id,
+        cohortStage: group.cohort_stage,
         positionSol: group.position_sol,
         exitHorizonMs: group.exit_horizon_ms,
         averageTriggerBuySol: group.average_trigger_buy_sol,
@@ -1552,8 +1682,14 @@ class ResearchStore {
         noExitRatePct: group.entry_filled ? group.no_exit / group.entry_filled * 100 : null,
         noExitQuote: group.no_exit_quote || 0,
         noTradeAfterHorizon: group.no_trade_after_horizon || 0,
+        noExitOther: Math.max(0, (group.no_exit || 0) - (group.no_exit_quote || 0)
+          - (group.no_trade_after_horizon || 0)),
         insufficientRoundTripLiquidity: group.insufficient_round_trip_liquidity || 0,
         roundTripCostTooHigh: group.round_trip_cost_too_high || 0,
+        rescueExitFilled: group.rescue_exit_filled || 0,
+        rescue5sFilled: group.rescue_5s_filled || 0,
+        rescue10sFilled: group.rescue_10s_filled || 0,
+        rescueUnresolved: group.rescue_unresolved || 0,
         infrastructureExecutable: false,
         ...returnStats(rows),
         ...eventConcentrationStats(rows),
@@ -1562,6 +1698,8 @@ class ResearchStore {
           noExit: group.no_exit || 0,
           noExitLossPcts: this.config.sameSlotNoExitScenarioLossPcts,
           jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
+          positionSol: group.position_sol,
+          modeledTipSol: group.modeled_jito_tip_sol,
         }),
       };
     }).sort(compareCohortPerformance);

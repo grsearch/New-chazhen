@@ -2,6 +2,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { ResearchStore, shadowScenarioStats } = require('../src/data/ResearchStore');
 
 function storedTrade(signature, receivedAtMs) {
@@ -22,6 +25,41 @@ test('Same-Slot scenarios include NO_EXIT loss and Jito tip sensitivity', () => 
   assert.equal(stats.noExitScenarios[0].averageNetReturnPct, -5);
   assert.equal(stats.noExitScenarios[1].averageNetReturnPct, -47.5);
   assert.equal(stats.jitoTipScenarios[0].averageNetReturnPct, 3);
+});
+
+test('schema V9 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdbr-b5-migration-'));
+  const dbPath = path.join(directory, 'research.db');
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let store = new ResearchStore({ dbPath, flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('discovery','mint','pool',1,'STRICT','[]','OBSERVING',0,1)
+  `).run();
+  store.db.prepare(`
+    INSERT INTO same_slot_shadow_simulations(
+      shadow_id,episode_id,target_rank,entry_profile_id,position_sol,exit_horizon_ms,
+      quote_model,status,infrastructure_mode,infrastructure_executable,
+      infrastructure_reason,data_quality_status,entry_assumption,entry_reference_rank,
+      entry_at_ms,trigger_buy_sol,created_at_ms,updated_at_ms
+    ) VALUES('old-b2','discovery',2,'R2-B2',1,500,'SHADOW_V2','CLOSED',
+      'THEORETICAL_ONLY',0,'TEST','TRUSTED','THEORETICAL',1,1,6,1,1)
+  `).run();
+  store.close();
+
+  store = new ResearchStore({
+    dbPath, flushMs: 60_000, batchMax: 1_000, sameSlotStrongTriggerBuySol: 5,
+  });
+  const migrated = store.db.prepare(`
+    SELECT entry_profile_id,cohort_stage FROM same_slot_shadow_simulations
+    WHERE shadow_id='old-b2'
+  `).get();
+  assert.deepEqual(migrated, {
+    entry_profile_id: 'R2-B5', cohort_stage: 'DISCOVERY_RECLASSIFIED_20260824',
+  });
+  store.close();
 });
 
 test('trade rows omit duplicate raw JSON and old event windows are pruned in bounded batches', () => {
@@ -288,9 +326,12 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   });
   store.insertSameSlotShadow({
     ...base, shadowId: 'rank-2', targetRank: 2, entryReferenceRank: 1,
-    entryProfileId: 'R2-B2', triggerBuySol: 3, triggerBuyToDumpPct: 30,
+    entryProfileId: 'R2-B5', cohortStage: 'HOLDOUT_B5_V1',
+    triggerBuySol: 6, triggerBuyToDumpPct: 30,
     triggerWallet: 'trigger-wallet',
     status: 'NO_EXIT', rejectionReason: 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON',
+    exitPhase: 'RESCUE_10000', exitReason: 'RESCUE_EXHAUSTED',
+    rescueAttemptedHorizons: [5_000, 10_000],
   });
   store.flush();
 
@@ -299,6 +340,8 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   assert.equal(summary.sameSlotShadow.entryFilled, 2);
   assert.equal(summary.sameSlotShadow.exitFilled, 1);
   assert.equal(summary.sameSlotShadow.noExit, 1);
+  assert.equal(summary.sameSlotShadow.primaryProfileEpisodes, 1);
+  assert.equal(summary.sameSlotShadow.rescueUnresolved, 1);
   assert.equal(summary.sameSlotShadow.winRatePct, 100);
   assert.equal(summary.sameSlotShadow.infrastructureExecutable, false);
   assert.deepEqual(
@@ -312,13 +355,21 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   `).get();
   assert.deepEqual(stored, {
     infrastructure_executable: 0,
-    entry_profile_id: 'R2-B2',
+    entry_profile_id: 'R2-B5',
     latency_model: 'ENTRY_REFERENCE_TO_NEXT_COMPETITOR_V2',
     competitor_gap_ms: 20,
-    trigger_buy_sol: 3,
+    trigger_buy_sol: 6,
     data_quality_status: 'TRUSTED',
     modeled_jito_tip_sol: 0.005,
   });
+  const b5 = summary.sameSlotShadowCohorts.find((row) => row.entryProfileId === 'R2-B5');
+  assert.equal(b5.cohortStage, 'HOLDOUT_B5_V1');
+  assert.equal(b5.rescueUnresolved, 1);
+  assert.equal(
+    b5.combinedScenarios.find((row) => row.noExitLossPct === -15 && row.tipSol === 0.01)
+      .averageNetReturnPct,
+    -16,
+  );
   store.close();
 });
 

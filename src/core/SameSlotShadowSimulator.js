@@ -71,6 +71,9 @@ class SameSlotShadowSimulator {
     this.responseBudgetMs = [
       config.parseBudgetMs, config.buildBudgetMs, config.signBudgetMs, config.sendBudgetMs,
     ].reduce((sum, value) => sum + Math.max(0, finite(value, 0)), 0);
+    this.rescueHorizonsMs = [...new Set((config.rescueHorizonsMs || [])
+      .map((value) => Math.trunc(finite(value, 0)))
+      .filter((value) => value > 0))].sort((left, right) => left - right);
     this.episodes = new Map();
     this.episodesByPool = new Map();
     this.simulations = new Map();
@@ -88,6 +91,11 @@ class SameSlotShadowSimulator {
       insufficientRoundTripLiquidity: 0,
       roundTripCostTooHigh: 0,
       rank2B2Entries: 0,
+      rank2B5Entries: 0,
+      rescueStarted: 0,
+      rescue5sFilled: 0,
+      rescue10sFilled: 0,
+      rescueUnresolved: 0,
       dataQualityQuarantined: 0,
     };
   }
@@ -148,7 +156,9 @@ class SameSlotShadowSimulator {
       if (!simulation || simulation.status !== 'PENDING_EXIT') continue;
       if (onlyEpisodes && !onlyEpisodes.has(simulation.episodeId)) continue;
       if (skipEpisodes.has(simulation.episodeId)) continue;
-      if (!sameAsset(simulation.dump, trade) || at < simulation.requestedExitAtMs) continue;
+      if (!sameAsset(simulation.dump, trade)) continue;
+      this._advanceExpiredExitPhases(simulation, at);
+      if (simulation.status !== 'PENDING_EXIT' || at < simulation.activeExitTargetAtMs) continue;
       if (!causallyAfter(trade, simulation.entryReferenceOrder)) continue;
       simulation.postHorizonTrades += 1;
       const sell = quoteSell(trade, simulation.tokenUnits, {
@@ -165,6 +175,7 @@ class SameSlotShadowSimulator {
         simulation.updatedAtMs = at;
         this.metrics.noExit += 1;
         this.metrics.dataQualityQuarantined += 1;
+        simulation.exitReason = 'DATA_QUALITY_REJECTED_EXIT';
         this._finish(simulation);
         this.store?.updateSameSlotShadow?.(simulation);
         changed.push(simulation);
@@ -193,16 +204,53 @@ class SameSlotShadowSimulator {
       }
     }
     for (const simulation of this.simulations.values()) {
-      if (simulation.status !== 'PENDING_EXIT' || now <= simulation.exitDeadlineAtMs) continue;
+      if (simulation.status !== 'PENDING_EXIT' || now <= simulation.activeExitDeadlineAtMs) continue;
+      if (this._advanceExpiredExitPhases(simulation, now)) changed.push(simulation);
+    }
+    return changed;
+  }
+
+  _phaseNoExitReason(simulation) {
+    return simulation.postHorizonTrades > 0
+      ? 'NO_CAUSAL_EXIT_QUOTE' : 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON';
+  }
+
+  _advanceExpiredExitPhases(simulation, now) {
+    let changed = false;
+    while (simulation.status === 'PENDING_EXIT' && now > simulation.activeExitDeadlineAtMs) {
+      const reason = this._phaseNoExitReason(simulation);
+      if (simulation.exitPhase === 'PRIMARY') {
+        simulation.primaryNoExitReason = reason;
+      } else if (simulation.activeRescueHorizonMs != null) {
+        simulation.rescueAttemptedHorizons = [...new Set([
+          ...(simulation.rescueAttemptedHorizons || []), simulation.activeRescueHorizonMs,
+        ])];
+      }
+      const currentHorizonMs = simulation.activeRescueHorizonMs || 0;
+      const nextHorizonMs = this.rescueHorizonsMs.find((value) => value > currentHorizonMs);
+      if (nextHorizonMs != null) {
+        if (simulation.exitPhase === 'PRIMARY') this.metrics.rescueStarted += 1;
+        simulation.exitPhase = `RESCUE_${nextHorizonMs}`;
+        simulation.activeRescueHorizonMs = nextHorizonMs;
+        simulation.activeExitTargetAtMs = simulation.entryAtMs + nextHorizonMs;
+        simulation.activeExitDeadlineAtMs = simulation.activeExitTargetAtMs
+          + Math.max(100, finite(this.config.rescueTimeoutMs, 2_000));
+        simulation.postHorizonTrades = 0;
+        simulation.updatedAtMs = now;
+        changed = true;
+        continue;
+      }
       simulation.status = 'NO_EXIT';
-      simulation.rejectionReason = simulation.postHorizonTrades > 0
-        ? 'NO_CAUSAL_EXIT_QUOTE' : 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON';
+      simulation.rejectionReason = reason;
+      simulation.exitReason = this.rescueHorizonsMs.length
+        ? 'RESCUE_EXHAUSTED' : 'PRIMARY_EXIT_EXHAUSTED';
       simulation.updatedAtMs = now;
       this.metrics.noExit += 1;
+      if (this.rescueHorizonsMs.length) this.metrics.rescueUnresolved += 1;
       this._finish(simulation);
-      this.store?.updateSameSlotShadow?.(simulation);
-      changed.push(simulation);
+      changed = true;
     }
+    if (changed) this.store?.updateSameSlotShadow?.(simulation);
     return changed;
   }
 
@@ -226,6 +274,7 @@ class SameSlotShadowSimulator {
       entryAssumption: 'THEORETICAL_RANK_1_POST_DUMP_STATE',
       entryReferenceRank: 0,
       triggerTrade: null,
+      cohortStage: 'CONTROL',
       quality: state.dataQuality,
     });
     if (strictBuys[0]) {
@@ -233,8 +282,12 @@ class SameSlotShadowSimulator {
         strictBuys[0].receivedAtMs ?? strictBuys[0].timestampMs,
         dump.detectedAtMs,
       );
-      const rank2ProfileId = finite(strictBuys[0].solAmount, 0)
-        >= this.config.minRank2TriggerBuySol ? 'R2-B2' : 'R2-BASE';
+      const triggerBuySol = finite(strictBuys[0].solAmount, 0);
+      const rank2ProfileId = triggerBuySol >= this.config.strongRank2TriggerBuySol
+        ? 'R2-B5'
+        : (triggerBuySol >= this.config.minRank2TriggerBuySol ? 'R2-B2' : 'R2-BASE');
+      const cohortStage = rank2ProfileId === this.config.primaryProfileId
+        ? this.config.primaryCohortStage : 'CONTROL';
       const rank2Quality = dataQuality(strictBuys[0], this.config, dump.signalTrade);
       const combinedQuality = {
         status: state.dataQuality.status === 'TRUSTED' && rank2Quality.status === 'TRUSTED'
@@ -250,6 +303,7 @@ class SameSlotShadowSimulator {
         entryAssumption: 'THEORETICAL_RANK_2_AFTER_OBSERVED_RANK_1',
         entryReferenceRank: 1,
         triggerTrade: strictBuys[0],
+        cohortStage,
         quality: combinedQuality,
       }));
       this._recordCompetitor({
@@ -281,7 +335,7 @@ class SameSlotShadowSimulator {
 
   _scheduleRank({
     dump, targetRank, entryProfileId, entryReferenceTrade, entryAtMs, entryAssumption,
-    entryReferenceRank, triggerTrade, quality,
+    entryReferenceRank, triggerTrade, cohortStage, quality,
   }) {
     if (!this.config.targetRanks.includes(targetRank)) return [];
     const created = [];
@@ -323,6 +377,7 @@ class SameSlotShadowSimulator {
           episodeId: dump.episodeId,
           targetRank,
           entryProfileId,
+          cohortStage: cohortStage || 'CONTROL',
           positionSol,
           exitHorizonMs,
           quoteModel: this.config.quoteModel,
@@ -375,6 +430,14 @@ class SameSlotShadowSimulator {
           modeledJitoTipSol: Math.max(0, finite(this.config.jitoTipSol, 0)),
           requestedExitAtMs: entryAtMs + exitHorizonMs,
           exitDeadlineAtMs: entryAtMs + exitHorizonMs + this.config.exitTimeoutMs,
+          activeExitTargetAtMs: entryAtMs + exitHorizonMs,
+          activeExitDeadlineAtMs: entryAtMs + exitHorizonMs + this.config.exitTimeoutMs,
+          exitPhase: 'PRIMARY',
+          activeRescueHorizonMs: null,
+          rescueHorizonMs: null,
+          rescueAttemptedHorizons: [],
+          primaryNoExitReason: null,
+          exitReason: null,
           postHorizonTrades: 0,
           dump,
           entryReferenceTrade,
@@ -393,6 +456,7 @@ class SameSlotShadowSimulator {
           if (targetRank === 1) this.metrics.rank1Entries += 1;
           if (targetRank === 2) this.metrics.rank2Entries += 1;
           if (entryProfileId === 'R2-B2') this.metrics.rank2B2Entries += 1;
+          if (entryProfileId === 'R2-B5') this.metrics.rank2B5Entries += 1;
         }
         this.store?.insertSameSlotShadow?.(simulation);
         created.push(simulation);
@@ -421,13 +485,24 @@ class SameSlotShadowSimulator {
 
   _close(simulation, trade, at, sell) {
     const totalCostSol = simulation.entryFeeSol + simulation.exitFeeSol;
+    const rescueHorizonMs = simulation.exitPhase === 'PRIMARY'
+      ? null : simulation.activeRescueHorizonMs;
+    if (rescueHorizonMs != null) {
+      simulation.rescueAttemptedHorizons = [...new Set([
+        ...(simulation.rescueAttemptedHorizons || []), rescueHorizonMs,
+      ])];
+      if (rescueHorizonMs === 5_000) this.metrics.rescue5sFilled += 1;
+      if (rescueHorizonMs === 10_000) this.metrics.rescue10sFilled += 1;
+    }
     Object.assign(simulation, {
       status: 'CLOSED',
       rejectionReason: null,
+      exitReason: rescueHorizonMs == null ? 'PRIMARY' : `RESCUE_${rescueHorizonMs}`,
+      rescueHorizonMs,
       exitAtMs: at,
       exitSlot: trade.slot ?? null,
       exitSignature: trade.signature || null,
-      exitQuoteLagMs: Math.max(0, at - simulation.requestedExitAtMs),
+      exitQuoteLagMs: Math.max(0, at - simulation.activeExitTargetAtMs),
       exitPrice: sell.price,
       exitMarketPrice: sell.marketPrice,
       exitImpactPct: sell.impactPct,
