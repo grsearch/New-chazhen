@@ -12,7 +12,7 @@ Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有�
 
 ## 策略流程
 
-1. **Stream Ingestion**：订阅 Pump Program 与全部 PumpSwap Program 交易，解析官方事件字段。
+1. **Stream Ingestion**：默认只订阅全部 PumpSwap Program 交易，解析官方事件字段；不再接收海量且与核心策略无关的迁移前 Pump Program 买卖。可选的 Pump 生命周期订阅仅用于精确迁移时间。
 2. **Slot Assembler**：记录 `slot / transactionIndex / instructionIndex / eventIndex / signature`。
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
@@ -130,6 +130,11 @@ pnpm start
 
 把 `.env` 中的 `SDBR_GRPC_TOKEN` 换成自己的 LaserStream Token。Dashboard 默认地址：
 `http://127.0.0.1:8787`。
+
+默认的 `SDBR_INCLUDE_PUMP_LIFECYCLE=false` 是 Helius 节省模式：迁移后的全部 PumpSwap
+币、砸盘、严格同 Slot 买单和退出路径仍会完整采集；程序不再接收迁移前 Pump Program 的
+全量交易。此时池龄来源为首次观察时间下限，服务刚启动后的币会先经过原有1/5分钟池龄等待，
+不会把未知池龄误报为精确迁移池龄。只有确实需要精确迁移时间时才应将该开关设为 `true`。
 
 也可回放已经标准化为一行一个 JSON 事件的 JSONL：
 

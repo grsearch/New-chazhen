@@ -29,6 +29,23 @@ function proto(type, value) {
   return type?.create ? type.create(value) : value;
 }
 
+function buildTransactionFilters(config, filterType) {
+  const filter = (programId) => proto(filterType, {
+    vote: false,
+    failed: false,
+    accountInclude: [programId],
+    accountExclude: [],
+    accountRequired: [],
+  });
+  const transactions = {
+    pumpSwap: filter(config.pump.ammProgramId),
+  };
+  if (config.stream.includePumpLifecycle) {
+    transactions.pumpLifecycle = filter(config.pump.programId);
+  }
+  return transactions;
+}
+
 class PumpFlowStream extends EventEmitter {
   constructor({ config, connectionFactory = null }) {
     super();
@@ -103,18 +120,10 @@ class PumpFlowStream extends EventEmitter {
     });
     if (typeof client.connect === 'function') await client.connect();
     const stream = await client.subscribe();
-    const filter = (programId) => proto(types.SubscribeRequestFilterTransactions, {
-      vote: false,
-      failed: false,
-      accountInclude: [programId],
-      accountExclude: [],
-      accountRequired: [],
-    });
     const request = proto(types.SubscribeRequest, {
-      transactions: {
-        pumpLifecycle: filter(this.config.pump.programId),
-        pumpSwap: filter(this.config.pump.ammProgramId),
-      },
+      transactions: buildTransactionFilters(
+        this.config, types.SubscribeRequestFilterTransactions,
+      ),
       accounts: {}, slots: {}, blocks: {}, blocksMeta: {}, entry: {},
       transactionsStatus: {}, accountsDataSlice: [],
       commitment: types.CommitmentLevel.PROCESSED,
@@ -194,8 +203,14 @@ class PumpFlowStream extends EventEmitter {
   }
 
   health(extra = {}) {
+    const includesPumpLifecycle = Boolean(this.config.stream.includePumpLifecycle);
     return {
-      mode: 'ACTIVE_PASSIVE_ALL_PUMPSWAP',
+      mode: includesPumpLifecycle
+        ? 'ACTIVE_PASSIVE_PUMPSWAP_PLUS_PUMP_LIFECYCLE'
+        : 'ACTIVE_PASSIVE_PUMPSWAP_ONLY',
+      subscriptionFilters: includesPumpLifecycle
+        ? ['pumpSwap', 'pumpLifecycle'] : ['pumpSwap'],
+      exactMigrationTimestamps: includesPumpLifecycle,
       endpointIndex: this.endpointIndex,
       endpoint: this.endpointIndex >= 0 ? this.config.stream.endpoints[this.endpointIndex] : null,
       connectedAtMs: this.connectedAtMs,
@@ -207,4 +222,4 @@ class PumpFlowStream extends EventEmitter {
   }
 }
 
-module.exports = { PumpFlowStream };
+module.exports = { PumpFlowStream, buildTransactionFilters };

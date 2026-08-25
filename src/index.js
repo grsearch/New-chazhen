@@ -104,6 +104,8 @@ async function main() {
   await dashboard.start();
   console.log(`Dashboard: http://${config.dashboard.host}:${config.dashboard.port}`);
   console.log('Mode: research only; transaction sending is not implemented.');
+  console.log(`LaserStream subscription: ${config.stream.includePumpLifecycle
+    ? 'PumpSwap + Pump lifecycle' : 'PumpSwap only (Helius-saving mode)'}.`);
   await stream.start();
   runtimeHealth = new RuntimeHealthMonitor({
     config: config.health,

@@ -58,6 +58,9 @@ const config = {
   stream: {
     endpoints: list('SDBR_GRPC_ENDPOINTS'),
     token: process.env.SDBR_GRPC_TOKEN || '',
+    // Pump Program carries the very high-volume pre-migration bonding-curve flow.
+    // Same-Slot research only needs PumpSwap; exact migration timestamps are optional.
+    includePumpLifecycle: boolean('SDBR_INCLUDE_PUMP_LIFECYCLE', false),
     reconnectMinMs: integer('SDBR_RECONNECT_MIN_MS', 1_000, { min: 250 }),
     reconnectMaxMs: integer('SDBR_RECONNECT_MAX_MS', 30_000, { min: 1_000 }),
     staleTimeoutMs: integer('SDBR_STALE_TIMEOUT_MS', 15_000, { min: 5_000 }),
