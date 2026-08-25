@@ -27,7 +27,7 @@ test('Same-Slot scenarios include NO_EXIT loss and Jito tip sensitivity', () => 
   assert.equal(stats.jitoTipScenarios[0].averageNetReturnPct, 3);
 });
 
-test('schema V9 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
+test('schema V10 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdbr-b5-migration-'));
   const dbPath = path.join(directory, 'research.db');
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -289,6 +289,51 @@ test('same-slot observations expose strict post-dump chain rank', () => {
   store.close();
 });
 
+test('quarantined same-slot observations remain stored but do not pollute dashboard statistics', () => {
+  const store = new ResearchStore({
+    dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000, sameSlotMaxTradeSol: 1_000,
+  });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('quality','mint','pool',1,'STRICT','[]','OBSERVING',0,1)
+  `).run();
+  const base = {
+    episodeId: 'quality', mint: 'mint', pool: 'pool', observedAtMs: 2, slot: 1,
+    eventIndex: 0, classification: 'STRICT_AFTER_DUMP', receiveLagMs: 1,
+    price: 1, priceBouncePct: 1, wallet: null,
+    rejectionReason: 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE',
+  };
+  store.insertSameSlotObservation({
+    ...base, observationId: 'trusted', signature: 'trusted', buySol: 5,
+    dataQualityStatus: 'TRUSTED', dataQualityReasons: [],
+  });
+  store.insertSameSlotObservation({
+    ...base, observationId: 'quarantined', signature: 'quarantined', buySol: 2_000,
+    dataQualityStatus: 'QUARANTINED', dataQualityReasons: ['TRADE_SOL_ABOVE_LIMIT'],
+  });
+  store.insertSameSlotObservation({
+    ...base, observationId: 'price-outlier', signature: 'price-outlier', buySol: 1,
+    priceBouncePct: 10_000, dataQualityStatus: 'QUARANTINED',
+    dataQualityReasons: ['OBSERVATION_PRICE_BOUNCE_ABOVE_LIMIT'],
+  });
+  store.flush();
+
+  const summary = store.summary();
+  assert.equal(summary.sameSlotProbe.observations, 1);
+  assert.equal(summary.sameSlotProbe.averageBuySol, 5);
+  assert.equal(summary.sameSlotProbe.dataQualityQuarantined, 2);
+  assert.equal(store.recentSameSlotObservationsPage(1, 20).total, 1);
+  assert.equal(store.db.prepare('SELECT COUNT(*) count FROM same_slot_observations').get().count, 3);
+  const quarantined = store.db.prepare(`
+    SELECT data_quality_reasons_json FROM same_slot_observations
+    WHERE observation_id='quarantined'
+  `).get();
+  assert.equal(quarantined.data_quality_reasons_json, '["TRADE_SOL_ABOVE_LIMIT"]');
+  store.close();
+});
+
 test('Same-Slot Shadow results persist separately and report rank cohorts', () => {
   const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
   store.db.prepare(`
@@ -319,6 +364,7 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   };
   store.insertSameSlotShadow({
     ...base, shadowId: 'rank-1', targetRank: 1, status: 'CLOSED',
+    exitReason: 'PRIMARY',
     exitAtMs: 1300, exitSlot: 11, exitSignature: 'exit', exitQuoteLagMs: 50,
     exitPrice: 1.1, exitMarketPrice: 1.1, exitImpactPct: 0, exitTotalFeeBps: 25,
     exitLiquidityUsagePct: 1, exitReserveSource: 'TEST', proceedsSol: 1.1,
@@ -341,6 +387,8 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
   assert.equal(summary.sameSlotShadow.exitFilled, 1);
   assert.equal(summary.sameSlotShadow.noExit, 1);
   assert.equal(summary.sameSlotShadow.primaryProfileEpisodes, 1);
+  assert.equal(summary.sameSlotShadow.primaryProfileMints, 1);
+  assert.equal(summary.sameSlotShadow.primaryNoExitEpisodes, 1);
   assert.equal(summary.sameSlotShadow.rescueUnresolved, 1);
   assert.equal(summary.sameSlotShadow.winRatePct, 100);
   assert.equal(summary.sameSlotShadow.infrastructureExecutable, false);
@@ -370,6 +418,16 @@ test('Same-Slot Shadow results persist separately and report rank cohorts', () =
       .averageNetReturnPct,
     -16,
   );
+  assert.equal(
+    b5.quickExitCombinedScenarios.find(
+      (row) => row.noExitLossPct === -15 && row.tipSol === 0.01,
+    ).averageNetReturnPct,
+    -16,
+  );
+  const rank1 = summary.sameSlotShadowCohorts.find((row) => row.entryProfileId === 'R1-RAW');
+  assert.equal(rank1.primaryExitFillRatePct, 100);
+  assert.equal(rank1.primaryHoldP50Ms, 300);
+  assert.equal(rank1.primaryHoldP95Ms, 300);
   store.close();
 });
 

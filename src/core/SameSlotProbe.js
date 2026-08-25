@@ -2,6 +2,7 @@
 
 const { reservePrice } = require('./AmmQuote');
 const { strictlyAfter } = require('./SlotAssembler');
+const { assessTradeDataQuality } = require('./TradeDataQuality');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -10,8 +11,12 @@ function finite(value, fallback = null) {
 }
 
 class SameSlotProbe {
-  constructor({ retentionMs = 5_000 } = {}) {
+  constructor({
+    retentionMs = 5_000, dataQualityConfig = null, maxPriceBouncePct = 500,
+  } = {}) {
     this.retentionMs = retentionMs;
+    this.dataQualityConfig = dataQualityConfig;
+    this.maxPriceBouncePct = maxPriceBouncePct;
     this.episodes = new Map();
     this.byPool = new Map();
     this.metrics = {
@@ -58,6 +63,18 @@ class SameSlotProbe {
       const classification = order === true ? 'STRICT_AFTER_DUMP' : 'SLOT_CORRELATED';
       const at = finite(trade.receivedAtMs ?? trade.timestampMs, Date.now());
       const price = reservePrice(trade);
+      const quality = assessTradeDataQuality(
+        trade, this.dataQualityConfig, dump.signalTrade,
+      );
+      const priceBouncePct = dump.postPrice > 0 && price > 0
+        ? (price / dump.postPrice - 1) * 100 : null;
+      if (Number.isFinite(priceBouncePct)
+        && Math.abs(priceBouncePct) > this.maxPriceBouncePct) {
+        quality.status = 'QUARANTINED';
+        quality.reasons = [...new Set([
+          ...quality.reasons, 'OBSERVATION_PRICE_BOUNCE_ABOVE_LIMIT',
+        ])];
+      }
       const observation = {
         observationId: [
           episodeId,
@@ -79,8 +96,9 @@ class SameSlotProbe {
         receiveLagMs: Math.max(0, at - dump.detectedAtMs),
         buySol: Math.max(0, finite(trade.solAmount, 0)),
         price,
-        priceBouncePct: dump.postPrice > 0 && price > 0
-          ? (price / dump.postPrice - 1) * 100 : null,
+        priceBouncePct,
+        dataQualityStatus: quality.status,
+        dataQualityReasons: quality.reasons,
         executable: false,
         rejectionReason: order === true
           ? 'OBSERVED_AFTER_EXECUTION_NO_SAME_SLOT_GUARANTEE'

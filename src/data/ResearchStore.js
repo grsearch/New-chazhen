@@ -159,6 +159,7 @@ class ResearchStore {
       sameSlotPrimaryProfileId: 'R2-B5',
       sameSlotPrimaryCohortStage: 'HOLDOUT_B5_V1',
       sameSlotStrongTriggerBuySol: 5,
+      sameSlotMaxTradeSol: 1_000,
       sameSlotNoExitScenarioLossPcts: [-15, -100],
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
       maxReportedRecoveryPct: 500,
@@ -201,7 +202,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '9')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '10')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -363,6 +364,8 @@ class ResearchStore {
         buy_sol REAL NOT NULL,
         price REAL,
         price_bounce_pct REAL,
+        data_quality_status TEXT NOT NULL DEFAULT 'UNASSESSED',
+        data_quality_reasons_json TEXT,
         executable INTEGER NOT NULL DEFAULT 0 CHECK(executable = 0),
         rejection_reason TEXT NOT NULL
       );
@@ -552,6 +555,9 @@ class ResearchStore {
     this._ensureColumn('simulations', 'entry_capacity_round_trip_loss_pct', 'REAL');
     this._ensureColumn('simulations', 'entry_capacity_exit_liquidity_usage_pct', 'REAL');
     this._ensureColumn('dump_events', 'parse_version', 'TEXT');
+    this._ensureColumn('same_slot_observations', 'data_quality_status',
+      "TEXT NOT NULL DEFAULT 'UNASSESSED'");
+    this._ensureColumn('same_slot_observations', 'data_quality_reasons_json', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'entry_profile_id',
       "TEXT NOT NULL DEFAULT 'LEGACY'");
     this._ensureColumn('same_slot_shadow_simulations', 'cohort_stage',
@@ -581,6 +587,20 @@ class ResearchStore {
       SET entry_profile_id='R2-B5',cohort_stage='DISCOVERY_RECLASSIFIED_20260824'
       WHERE target_rank=2 AND entry_profile_id='R2-B2' AND trigger_buy_sol>=?
     `).run(this.config.sameSlotStrongTriggerBuySol);
+    this.db.prepare(`
+      UPDATE same_slot_observations
+      SET data_quality_status='QUARANTINED',
+        data_quality_reasons_json='["TRADE_SOL_ABOVE_LIMIT"]'
+      WHERE COALESCE(data_quality_status,'UNASSESSED')='UNASSESSED'
+        AND buy_sol>?
+    `).run(this.config.sameSlotMaxTradeSol);
+    this.db.prepare(`
+      UPDATE same_slot_observations
+      SET data_quality_status='QUARANTINED',
+        data_quality_reasons_json='["OBSERVATION_PRICE_BOUNCE_ABOVE_LIMIT"]'
+      WHERE COALESCE(data_quality_status,'UNASSESSED')='UNASSESSED'
+        AND ABS(price_bounce_pct)>?
+    `).run(this.config.maxReportedRecoveryPct);
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_same_slot_shadow_profile_cohort
         ON same_slot_shadow_simulations(
@@ -699,12 +719,14 @@ class ResearchStore {
           observation_id,episode_id,mint,pool,observed_at_ms,slot,
           dump_transaction_index,buy_transaction_index,instruction_index,event_index,
           signature,wallet,classification,receive_lag_ms,buy_sol,price,
-          price_bounce_pct,executable,rejection_reason
+          price_bounce_pct,data_quality_status,data_quality_reasons_json,
+          executable,rejection_reason
         ) VALUES (
           @observationId,@episodeId,@mint,@pool,@observedAtMs,@slot,
           @dumpTransactionIndex,@buyTransactionIndex,@instructionIndex,@eventIndex,
           @signature,@wallet,@classification,@receiveLagMs,@buySol,@price,
-          @priceBouncePct,@executable,@rejectionReason
+          @priceBouncePct,@dataQualityStatus,@dataQualityReasonsJson,
+          @executable,@rejectionReason
         )
       `),
       sameSlotShadow: this.db.prepare(`
@@ -984,6 +1006,8 @@ class ResearchStore {
       buySol: Math.max(0, number(observation.buySol) || 0),
       price: number(observation.price),
       priceBouncePct: number(observation.priceBouncePct),
+      dataQualityStatus: value(observation.dataQualityStatus) || 'UNASSESSED',
+      dataQualityReasonsJson: json(observation.dataQualityReasons),
     });
   }
 
@@ -1195,6 +1219,16 @@ class ResearchStore {
       FROM coverage
     `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       this.config.maxReportedRecoveryPct);
+    const sameSlotQuarantined = this.db.prepare(`
+      SELECT COUNT(*) count
+      FROM same_slot_observations o
+      JOIN dump_events d ON d.episode_id=o.episode_id
+      WHERE COALESCE(o.data_quality_status,'UNASSESSED')='QUARANTINED'
+        AND (d.drop_pct IS NULL OR d.drop_pct<=?)
+        AND (? IS NULL OR d.parse_version=?)
+        AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      this.config.maxReportedRecoveryPct);
     const sameSlot = this.db.prepare(`
       WITH ranked AS (
         SELECT o.*,CASE WHEN o.classification='STRICT_AFTER_DUMP' THEN
@@ -1207,6 +1241,7 @@ class ResearchStore {
         WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
           AND (? IS NULL OR d.parse_version=?)
           AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
+          AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
       )
       SELECT COUNT(*) observations,
         SUM(CASE WHEN classification='STRICT_AFTER_DUMP' THEN 1 ELSE 0 END) strict_after_dump,
@@ -1235,6 +1270,7 @@ class ResearchStore {
         WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
           AND (? IS NULL OR d.parse_version=?)
           AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
+          AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
       )
       SELECT episode_id,post_dump_buy_rank,receive_lag_ms FROM ranked
       WHERE post_dump_buy_rank IN (1,2)
@@ -1339,6 +1375,27 @@ class ResearchStore {
       this.config.maxDumpDropPct,
       acceptedVersion, acceptedVersion, this.config.maxReportedRecoveryPct,
       shadowModel, shadowModel);
+    const sameSlotPrimaryCounts = this.db.prepare(`
+      SELECT COUNT(DISTINCT d.mint) primary_profile_mints,
+        COUNT(DISTINCT CASE WHEN s.status='CLOSED' AND s.exit_reason='PRIMARY'
+          THEN s.episode_id END) primary_exit_episodes,
+        COUNT(DISTINCT CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=5000
+          THEN s.episode_id END) rescue_5s_episodes,
+        COUNT(DISTINCT CASE WHEN s.status='CLOSED' AND s.rescue_horizon_ms=10000
+          THEN s.episode_id END) rescue_10s_episodes,
+        COUNT(DISTINCT CASE WHEN s.status='NO_EXIT'
+          THEN s.episode_id END) no_exit_episodes
+      FROM same_slot_shadow_simulations s
+      JOIN dump_events d ON d.episode_id=s.episode_id
+      WHERE s.entry_profile_id=? AND s.cohort_stage=?
+        AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+        AND (d.drop_pct IS NULL OR d.drop_pct<=?)
+        AND (? IS NULL OR d.parse_version=?)
+        AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
+        AND (? IS NULL OR s.quote_model=?)
+    `).get(this.config.sameSlotPrimaryProfileId, this.config.sameSlotPrimaryCohortStage,
+      this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      this.config.maxReportedRecoveryPct, shadowModel, shadowModel);
     const sameSlotShadowReturns = this.db.prepare(`
       SELECT s.episode_id episodeId,s.position_sol,s.modeled_jito_tip_sol,s.net_return_pct
       FROM same_slot_shadow_simulations s
@@ -1435,6 +1492,7 @@ class ResearchStore {
         averageReceiveLagMs: sameSlot.average_receive_lag_ms,
         averageBuySol: sameSlot.average_buy_sol,
         totalBuySol: sameSlot.total_buy_sol || 0,
+        dataQualityQuarantined: sameSlotQuarantined.count || 0,
         executableSignals: sameSlot.executable_signals || 0,
         executionEnabled: false,
       },
@@ -1456,6 +1514,11 @@ class ResearchStore {
         primaryCohortStage: this.config.sameSlotPrimaryCohortStage,
         primaryProfileEpisodes: sameSlotShadowCounts.primary_profile_episodes || 0,
         primaryProfileAllEpisodes: sameSlotShadowCounts.primary_profile_all_episodes || 0,
+        primaryProfileMints: sameSlotPrimaryCounts.primary_profile_mints || 0,
+        primaryExitEpisodes: sameSlotPrimaryCounts.primary_exit_episodes || 0,
+        primaryRescue5sEpisodes: sameSlotPrimaryCounts.rescue_5s_episodes || 0,
+        primaryRescue10sEpisodes: sameSlotPrimaryCounts.rescue_10s_episodes || 0,
+        primaryNoExitEpisodes: sameSlotPrimaryCounts.no_exit_episodes || 0,
         rank2PositiveHeadroomPct: sameSlotShadowCounts.rank_2_headroom_samples
           ? sameSlotShadowCounts.rank_2_positive_headroom
             / sameSlotShadowCounts.rank_2_headroom_samples * 100 : null,
@@ -1614,6 +1677,8 @@ class ResearchStore {
         COUNT(*) scheduled,
         SUM(CASE WHEN s.status<>'NO_ENTRY' THEN 1 ELSE 0 END) entry_filled,
         SUM(CASE WHEN s.status='CLOSED' THEN 1 ELSE 0 END) exit_filled,
+        SUM(CASE WHEN s.status='CLOSED' AND s.exit_reason='PRIMARY'
+          THEN 1 ELSE 0 END) primary_exit_filled,
         SUM(CASE WHEN s.status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry,
         SUM(CASE WHEN s.status='NO_EXIT' THEN 1 ELSE 0 END) no_exit,
         SUM(CASE WHEN s.status='NO_EXIT'
@@ -1648,7 +1713,8 @@ class ResearchStore {
       this.config.maxReportedRecoveryPct, shadowModel, shadowModel);
     const returns = this.db.prepare(`
       SELECT s.episode_id episodeId,s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
-        s.position_sol,s.exit_horizon_ms,s.modeled_jito_tip_sol,s.net_return_pct
+        s.position_sol,s.exit_horizon_ms,s.modeled_jito_tip_sol,s.net_return_pct,
+        s.exit_reason,s.hold_ms
       FROM same_slot_shadow_simulations s
       JOIN dump_events d ON d.episode_id=s.episode_id
       WHERE s.status='CLOSED' AND (d.drop_pct IS NULL OR d.drop_pct<=?)
@@ -1665,6 +1731,17 @@ class ResearchStore {
         && row.cohort_stage === group.cohort_stage
         && row.position_sol === group.position_sol
         && row.exit_horizon_ms === group.exit_horizon_ms);
+      const primaryRows = rows.filter((row) => row.exit_reason === 'PRIMARY');
+      const primaryHoldValues = primaryRows.map((row) => number(row.hold_ms))
+        .filter(Number.isFinite);
+      const quickExitScenarios = shadowScenarioStats({
+        closedRows: primaryRows,
+        noExit: Math.max(0, (group.entry_filled || 0) - primaryRows.length),
+        noExitLossPcts: this.config.sameSlotNoExitScenarioLossPcts,
+        jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
+        positionSol: group.position_sol,
+        modeledTipSol: group.modeled_jito_tip_sol,
+      });
       return {
         quoteModel: group.quote_model,
         targetRank: group.target_rank,
@@ -1677,6 +1754,11 @@ class ResearchStore {
         scheduled: group.scheduled,
         entryFillRatePct: group.scheduled ? group.entry_filled / group.scheduled * 100 : null,
         exitFillRatePct: group.entry_filled ? group.exit_filled / group.entry_filled * 100 : null,
+        primaryExitFilled: group.primary_exit_filled || 0,
+        primaryExitFillRatePct: group.entry_filled
+          ? (group.primary_exit_filled || 0) / group.entry_filled * 100 : null,
+        primaryHoldP50Ms: percentile(primaryHoldValues, 0.5),
+        primaryHoldP95Ms: percentile(primaryHoldValues, 0.95),
         noEntry: group.no_entry || 0,
         noExit: group.no_exit || 0,
         noExitRatePct: group.entry_filled ? group.no_exit / group.entry_filled * 100 : null,
@@ -1690,6 +1772,7 @@ class ResearchStore {
         rescue5sFilled: group.rescue_5s_filled || 0,
         rescue10sFilled: group.rescue_10s_filled || 0,
         rescueUnresolved: group.rescue_unresolved || 0,
+        quickExitCombinedScenarios: quickExitScenarios.combinedScenarios,
         infrastructureExecutable: false,
         ...returnStats(rows),
         ...eventConcentrationStats(rows),
@@ -1764,6 +1847,7 @@ class ResearchStore {
         JOIN dump_events d ON d.episode_id=o.episode_id
         WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
           AND (? IS NULL OR d.parse_version=?)
+          AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
       )
       SELECT * FROM ranked ORDER BY observed_at_ms DESC LIMIT ?
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
@@ -1780,6 +1864,7 @@ class ResearchStore {
       JOIN dump_events d ON d.episode_id=o.episode_id
       WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
         AND (? IS NULL OR d.parse_version=?)
+        AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
     `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion).count;
     const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
     const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
@@ -1794,6 +1879,7 @@ class ResearchStore {
         JOIN dump_events d ON d.episode_id=o.episode_id
         WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
           AND (? IS NULL OR d.parse_version=?)
+          AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
       )
       SELECT * FROM ranked ORDER BY observed_at_ms DESC LIMIT ? OFFSET ?
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion, normalizedSize,

@@ -1,9 +1,10 @@
 'use strict';
 
 const {
-  effectiveReserves, quoteImmediateRoundTrip, quoteSell, reservePrice, transactionFeeSol,
+  quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
 } = require('./AmmQuote');
 const { strictlyAfter } = require('./SlotAssembler');
+const { assessTradeDataQuality } = require('./TradeDataQuality');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -28,38 +29,6 @@ function causallyAfter(candidate, reference) {
 
 function pct(part, whole) {
   return whole > 0 ? part / whole * 100 : null;
-}
-
-function dataQuality(trade, config, referenceTrade = null) {
-  const reasons = [];
-  const reserves = effectiveReserves(trade);
-  const quoteSol = reserves ? Number(reserves.quoteRaw) / 1e9 : null;
-  const tradeSol = Math.max(0, finite(trade?.solAmount, 0));
-  const eventPrice = finite(trade?.price);
-  const currentReservePrice = reservePrice(trade);
-  if (tradeSol > config.maxTradeSol) reasons.push('TRADE_SOL_ABOVE_LIMIT');
-  if (quoteSol != null && quoteSol > config.maxQuoteReserveSol) {
-    reasons.push('QUOTE_RESERVE_ABOVE_LIMIT');
-  }
-  if (quoteSol > 0 && pct(tradeSol, quoteSol) > config.maxTradeToQuotePct) {
-    reasons.push('TRADE_TO_QUOTE_ABOVE_LIMIT');
-  }
-  if (eventPrice > 0 && currentReservePrice > 0
-    && Math.abs(eventPrice / currentReservePrice - 1) * 100
-      > config.maxEventReservePriceDeviationPct) {
-    reasons.push('EVENT_RESERVE_PRICE_DIVERGENCE');
-  }
-  const referenceReserves = referenceTrade ? effectiveReserves(referenceTrade) : null;
-  const referenceQuoteSol = referenceReserves ? Number(referenceReserves.quoteRaw) / 1e9 : null;
-  if (quoteSol > 0 && referenceQuoteSol > 0
-    && Math.max(quoteSol, referenceQuoteSol) / Math.min(quoteSol, referenceQuoteSol)
-      > config.maxQuoteReserveChangeMultiple) {
-    reasons.push('QUOTE_RESERVE_DISCONTINUITY');
-  }
-  return {
-    status: reasons.length ? 'QUARANTINED' : 'TRUSTED',
-    reasons: [...new Set(reasons)],
-  };
 }
 
 class SameSlotShadowSimulator {
@@ -110,7 +79,7 @@ class SameSlotShadowSimulator {
       dump,
       trades: [],
       finalized: false,
-      dataQuality: dataQuality(dump.signalTrade, this.config),
+      dataQuality: assessTradeDataQuality(dump.signalTrade, this.config),
     });
     const episodeIds = this.episodesByPool.get(dump.pool) || new Set();
     episodeIds.add(dump.episodeId);
@@ -164,7 +133,9 @@ class SameSlotShadowSimulator {
       const sell = quoteSell(trade, simulation.tokenUnits, {
         slippageBps: this.config.sellSlippageBps,
       });
-      const exitQuality = dataQuality(trade, this.config, simulation.entryReferenceTrade);
+      const exitQuality = assessTradeDataQuality(
+        trade, this.config, simulation.entryReferenceTrade,
+      );
       if (exitQuality.status !== 'TRUSTED') {
         simulation.status = 'NO_EXIT';
         simulation.rejectionReason = 'DATA_QUALITY_REJECTED_EXIT';
@@ -288,7 +259,9 @@ class SameSlotShadowSimulator {
         : (triggerBuySol >= this.config.minRank2TriggerBuySol ? 'R2-B2' : 'R2-BASE');
       const cohortStage = rank2ProfileId === this.config.primaryProfileId
         ? this.config.primaryCohortStage : 'CONTROL';
-      const rank2Quality = dataQuality(strictBuys[0], this.config, dump.signalTrade);
+      const rank2Quality = assessTradeDataQuality(
+        strictBuys[0], this.config, dump.signalTrade,
+      );
       const combinedQuality = {
         status: state.dataQuality.status === 'TRUSTED' && rank2Quality.status === 'TRUSTED'
           ? 'TRUSTED' : 'QUARANTINED',

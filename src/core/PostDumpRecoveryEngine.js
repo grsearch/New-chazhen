@@ -19,7 +19,10 @@ class PostDumpRecoveryEngine {
       toxicFilter: this.toxicFilter,
       now,
     });
-    this.sameSlotProbe = new SameSlotProbe();
+    this.sameSlotProbe = new SameSlotProbe({
+      dataQualityConfig: config.sameSlotShadow || null,
+      maxPriceBouncePct: config.recovery?.maxReportedRecoveryPct || 500,
+    });
     this.sameSlotShadow = new SameSlotShadowSimulator({
       config: config.sameSlotShadow || { enabled: false }, store, now,
     });

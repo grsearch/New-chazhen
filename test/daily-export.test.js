@@ -74,7 +74,13 @@ test('daily export keeps a consistent 24-hour research window', () => {
   const result = exportResearchWindow({
     sourcePath: source, destinationPath: destination, startMs, endMs, schemaPath: schema,
   });
+  assert.equal(result.formatVersion, 2);
   assert.equal(result.integrity, 'ok');
+  assert.equal(result.analysisReadiness.schemaVersion, '10');
+  assert.deepEqual(result.analysisReadiness.missingColumns, []);
+  assert.equal(result.analysisReadiness.status, 'COLLECT_MORE_DATA');
+  assert.equal(result.analysisReadiness.liveTradingDecision, 'NOT_DECIDED_BY_EXPORT');
+  assert.ok(result.analysisReadiness.gates.some((gate) => !gate.passed));
   const exported = new Database(destination, { readonly: true, fileMustExist: true });
   assert.deepEqual(exported.prepare('SELECT signature FROM trades').all(), [{ signature: 'inside-trade' }]);
   assert.deepEqual(exported.prepare('SELECT episode_id FROM dump_events').all(), [{ episode_id: 'inside' }]);

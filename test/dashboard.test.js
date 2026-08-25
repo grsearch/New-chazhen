@@ -43,7 +43,7 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /id="same-slot-shadow-pager"/);
   assert.match(source, /核心：R2-B5 验证组与 Same-Slot Shadow 对照组/);
   assert.match(source, /Rank#2买单间隔P50/);
-  assert.match(source, /NO_EXIT=-15% \+ Jito 0\.01/);
+  assert.match(source, /含救援NO_EXIT=-15% \+ Jito 0\.01/);
   assert.match(source, /Jito 0\.01/);
   assert.match(source, /Rank#\$\{r\.targetRank\}/);
   assert.match(source, /Shadow平均净收益/);
@@ -52,7 +52,11 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /<th>链上Tx位置<\/th>/);
   assert.match(source, /R2-B5验证事件/);
   assert.match(source, /B5 >23ms\/全部事件/);
-  assert.match(source, /应急5s退出/);
+  assert.match(source, /B5事件含5s救援/);
+  assert.match(source, /<th>主Exit<\/th>/);
+  assert.match(source, /主退出持有 P50\/P95/);
+  assert.match(source, /主窗口失败=-15% \+ Jito 0\.01/);
+  assert.match(source, /观测异常已隔离/);
   assert.match(source, /数据异常\/旧解析/);
   assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
   assert.match(source, /<th>独立CLOSED<\/th>/);

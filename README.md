@@ -108,6 +108,10 @@ V1 曾把 5000 bps 的 Buyback 分配比例误当成 50% 额外交易费；V2 �
 
 Same-Slot公开储备路径使用独立版本`PUMPSWAP_SAME_SLOT_PUBLIC_RESERVE_PATH_V2`。统计接口只汇总当前版本；恢复比例超过上限的事件及异常成交/储备连续性组合会从砸盘、确认、Same-Slot和后续Slot收益汇总中统一隔离并单独计数。原始行和旧Same-Slot行仍留在SQLite供审计，但不会与V2收益混合。
 
+Same-Slot公开买单观测也保存独立的数据质量状态。新数据会根据成交额、Quote储备、成交/储备价格偏差、价格反弹上限及相邻储备连续性标记为`TRUSTED`或`QUARANTINED`；升级前无法完整重算的历史行保留为`UNASSESSED`，但成交额或价格反弹明显超过上限的历史行会自动隔离。`QUARANTINED`行仍保留在数据库和每日导出中，不参与Dashboard的金额均值、排名、延迟和最近观测列表。
+
+Same-Slot退出统计分成两层：`主Exit`仅包含100/250/500ms目标及其2秒报价宽限内的退出，并报告真实持有时间P50/P95；`含救援Exit`再加入5秒和10秒救援。Dashboard同时显示“主窗口失败即按损失处理”和“保留救援实际结果”两种情景，避免用较慢的救援成交掩盖快速回跑策略本身的退出能力。
+
 卖前价格优先使用 5 秒内最后一笔公开储备价格；缺失时才用 SellEvent 的卖后储备重建，并把来源写入数据库。
 Token精度通过事件中的`user_base_token_account`映射到该账户自己的Token Balance。多Token交易无法完成账户映射时，
 整笔事件不参与价格和策略计算，禁止再使用“全交易余额变化最大的Mint”作为猜测。
@@ -157,7 +161,7 @@ systemctl list-timers post-dump-recovery-backup.timer --all
 cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
-上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256；上传主文件和校验文件后，
+上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256。Manifest内置Go/No-Go研究就绪审计，自动检查实际Stream覆盖时长、Schema关键字段、观测质量已评估比例、R2-B5独立事件与独立币、主退出事件、Rank #2速度余量样本、终态完成率，以及1/2/5 SOL × 100/250/500ms九个组合是否齐全。`READY_FOR_GO_NO_GO_ANALYSIS`只表示数据足以进入人工分析，不代表程序自动批准实盘；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
 
 ## 程序内置健康检查
@@ -196,7 +200,7 @@ node scripts/compact-event-window-db.js \
 - `slot_summaries`：transaction index 覆盖与 Slot 完整性统计。
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、生存率和二次砸盘。
 - `confirmations`：R1/R2/LQ 的确认时点与全部恢复特征。
-- `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额和接收延迟。
+- `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额、接收延迟和观测级数据质量状态。
 - `same_slot_shadow_simulations`：理论Rank #1/#2入场、`R1-RAW/R2-BASE/R2-B2/R2-B5`分组、发现/验证样本标签、第一笔买单金额、正确的两买单间隔、速度余量、数据质量状态、容量检查、快速/应急退出和扣费收益。
 - `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。

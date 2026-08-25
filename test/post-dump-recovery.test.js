@@ -121,6 +121,7 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   assert.equal(store.simulations.size, 0, 'same-slot observations cannot create shadow positions');
   assert.equal(store.sameSlotObservations.length, 1);
   assert.equal(store.sameSlotObservations[0].classification, 'STRICT_AFTER_DUMP');
+  assert.equal(store.sameSlotObservations[0].dataQualityStatus, 'TRUSTED');
   assert.equal(store.sameSlotObservations[0].executable, false);
   assert.equal(store.sameSlotObservations[0].receiveLagMs, 100);
   assert.equal(
@@ -433,6 +434,31 @@ test('same-slot probe expires inactive dumps without creating strategy state', (
   assert.equal(engine.sameSlotProbe.health().activeDumps, 0);
   assert.equal(store.confirmations.length, 0);
   assert.equal(store.simulations.size, 0);
+});
+
+test('same-slot probe quarantines impossible price rebounds without deleting the observation', () => {
+  const base = 1_800_080_000_000;
+  const engine = new PostDumpRecoveryEngine({
+    config: configuration(), store: new MemoryStore(), now: () => base,
+  });
+  const signalTrade = trade({
+    at: base, slot: 10, tx: 1, side: 'SELL', sol: 10,
+    price: 1e-7, wallet: 'seller', quoteSol: 100, sequence: 50,
+  });
+  engine.sameSlotProbe.startEpisode({
+    episodeId: 'price-outlier', pool: 'pool', mint: 'mint', slot: 10,
+    detectedAtMs: base, postPrice: 1e-12, signalTrade,
+  });
+  const observations = engine.sameSlotProbe.observeTrade(trade({
+    at: base + 10, slot: 10, tx: 2, side: 'BUY', sol: 1,
+    price: 1e-7, wallet: 'buyer', quoteSol: 100, sequence: 51,
+  }));
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].dataQualityStatus, 'QUARANTINED');
+  assert.deepEqual(
+    observations[0].dataQualityReasons,
+    ['OBSERVATION_PRICE_BOUNCE_ABOVE_LIMIT'],
+  );
 });
 
 test('creator dumps are recorded but never reach confirmation', () => {
