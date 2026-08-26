@@ -180,7 +180,7 @@ systemctl list-timers post-dump-recovery-backup.timer --all
 cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
-上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。Manifest自动检查实际Stream覆盖时长、Schema关键字段、观测质量、宽口径事件/Mint、同Slot事件、下一Slot事件及模拟终态完成率，并单列观察钱包统计。导出只报告`COLLECT_MORE_DATA`或`READY_FOR_ANALYSIS`，实盘决定始终为`TRADING_DISABLED`；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
+上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。Manifest自动检查实际Stream有效覆盖时长、首尾缺口、超过5秒的内部空洞、Schema关键字段、观测质量、宽口径事件/Mint、同Slot事件、下一Slot事件及模拟终态完成率，并单列观察钱包统计。覆盖率不再用首条到末条记录的简单跨度冒充。导出只报告`COLLECT_MORE_DATA`或`READY_FOR_ANALYSIS`，实盘决定始终为`TRADING_DISABLED`；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
 
 ## 程序内置健康检查
@@ -189,15 +189,21 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 
 - LaserStream 每2秒检查一次数据新鲜度，默认15秒无消息便自动断开并轮换端点重连。
 - 总健康监控每60秒检查 Stream 状态、最近事件时间、SQLite 待写队列、新增写入错误和磁盘余量。
+- 轻量日志与交易状态默认最多等待30秒关联；Join质量按当前连接最近5分钟的成熟样本滚动计算，不把仍在等待的数据放进分母，也不会让旧连接的异常累计污染新连接。
+- 启动宽限默认3分钟。成熟样本至少100条后，Join率连续2次低于90%只会定向重连日志流和状态流；重连冷却默认2分钟，不会退出整个进程。
 - 默认在剩余空间低于10GB或10%时进入 `DEGRADED`，防止数据库再次写满系统盘。
 - 正常时每10分钟只向 systemd Journal 写一条简短日志。
-- 连续5次异常（默认约5分钟）才退出进程；服务器现有的 `Restart=always` 会自动拉起。
+- 只有持续Stream失联、数据库写入异常等不可恢复问题连续5次出现，才退出进程；服务器现有的 `Restart=always` 会自动拉起。
 - `/api/health` 的 `runtime.status` 会显示 `STARTING`、`HEALTHY` 或 `DEGRADED`。
-- 轻量模式额外检查日志/交易状态合并率；两侧各收到至少100条后持续低于90%，会进入`DEGRADED`并按现有systemd策略重连。
+- 轻量模式额外检查日志/交易状态合并率；最近窗口已有至少100条成熟结果且持续低于90%时，会进入`DEGRADED`并由进程定向重连两条Stream。
 
 因此不应再配置 OpenClaw 每10分钟轮询。可选环境变量包括
 `SDBR_HEALTH_CHECK_MS`、`SDBR_HEALTH_MAX_EVENT_STALE_MS`、`SDBR_HEALTH_MAX_PENDING_WRITES`、
 `SDBR_HEALTH_MIN_DISK_FREE_GB`、`SDBR_HEALTH_MIN_DISK_FREE_PCT`、
+`SDBR_HEALTH_STARTUP_GRACE_MS`、`SDBR_LOG_STATUS_JOIN_TTL_MS`、
+`SDBR_LOG_STATUS_JOIN_WINDOW_MS`、`SDBR_LOG_STATUS_JOIN_BUCKET_MS`、
+`SDBR_HEALTH_MIN_JOIN_SAMPLES`、`SDBR_HEALTH_MIN_JOIN_RATE_PCT`、
+`SDBR_HEALTH_RECOVERY_CHECKS`、`SDBR_HEALTH_RECOVERY_COOLDOWN_MS`、
 `SDBR_HEALTH_FATAL_CHECKS` 和 `SDBR_HEALTH_EXIT_ON_FATAL`。
 
 ## SQLite 容量控制

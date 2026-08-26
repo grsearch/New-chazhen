@@ -10,6 +10,7 @@ const CANDIDATE_PROFILE_ID = 'R2-B10-Q500-V1';
 const CANDIDATE_COHORT_STAGE = 'HOLDOUT_B10_Q500_V1';
 const CANDIDATE_PRIMARY_POSITION_SOL = 1;
 const CANDIDATE_PRIMARY_EXIT_HORIZON_MS = 250;
+const STREAM_GAP_TOLERANCE_MS = 5_000;
 
 const EXPLICIT_FILTERS = Object.freeze({
   trades: {
@@ -187,7 +188,12 @@ function researchReadiness(databasePath, startMs, endMs) {
     const blockingMissingColumns = missingColumns
       .filter((column) => column !== observationQualityColumn);
     const empty = {
-      stream: { coverageHours: 0, maximumObservedGapMs: null, slotSummaries: 0 },
+      stream: {
+        coverageHours: 0, observedSpanHours: 0, maximumObservedGapMs: null,
+        leadingGapMs: endMs - startMs, trailingGapMs: 0, internalMissingMs: 0,
+        significantGapCount: 0, gapToleranceMs: STREAM_GAP_TOLERANCE_MS,
+        slotSummaries: 0,
+      },
       dumps: { episodes: 0, mints: 0 },
       broadResearch: {
         episodes: 0, mints: 0, averageAbsorptionScore: null,
@@ -230,9 +236,23 @@ function researchReadiness(databasePath, startMs, endMs) {
         SELECT COUNT(*) slot_summaries,MIN(first_received_at_ms) first_at_ms,
           MAX(last_received_at_ms) last_at_ms,
           MAX(CASE WHEN previous_at_ms IS NOT NULL
-            THEN MAX(0,first_received_at_ms-previous_at_ms) END) maximum_observed_gap_ms
+            THEN MAX(0,first_received_at_ms-previous_at_ms) END) maximum_observed_gap_ms,
+          SUM(CASE WHEN previous_at_ms IS NOT NULL
+            THEN MAX(0,first_received_at_ms-previous_at_ms-${STREAM_GAP_TOLERANCE_MS})
+            ELSE 0 END) internal_missing_ms,
+          SUM(CASE WHEN previous_at_ms IS NOT NULL
+            AND first_received_at_ms-previous_at_ms>${STREAM_GAP_TOLERANCE_MS}
+            THEN 1 ELSE 0 END) significant_gap_count
         FROM ordered
       `).get();
+      const windowMs = endMs - startMs;
+      const firstAtMs = Number.isFinite(stream.first_at_ms) ? stream.first_at_ms : null;
+      const lastAtMs = Number.isFinite(stream.last_at_ms) ? stream.last_at_ms : null;
+      const leadingGapMs = firstAtMs == null ? windowMs : Math.max(0, firstAtMs - startMs);
+      const trailingGapMs = lastAtMs == null ? 0 : Math.max(0, endMs - lastAtMs);
+      const internalMissingMs = Math.max(0, Number(stream.internal_missing_ms) || 0);
+      const effectiveCoverageMs = firstAtMs == null || lastAtMs == null
+        ? 0 : Math.max(0, windowMs - leadingGapMs - trailingGapMs - internalMissingMs);
       const dumps = db.prepare(`
         SELECT COUNT(*) episodes,COUNT(DISTINCT mint) mints FROM dump_events
       `).get();
@@ -392,9 +412,15 @@ function researchReadiness(databasePath, startMs, endMs) {
       const positiveHeadroom = Number(b5.positive_headroom_episodes) || 0;
       metrics = {
         stream: {
-          coverageHours: stream.first_at_ms != null && stream.last_at_ms != null
-            ? (stream.last_at_ms - stream.first_at_ms) / 3_600_000 : 0,
+          coverageHours: effectiveCoverageMs / 3_600_000,
+          observedSpanHours: firstAtMs != null && lastAtMs != null
+            ? Math.max(0, lastAtMs - firstAtMs) / 3_600_000 : 0,
           maximumObservedGapMs: stream.maximum_observed_gap_ms,
+          leadingGapMs,
+          trailingGapMs,
+          internalMissingMs,
+          significantGapCount: stream.significant_gap_count || 0,
+          gapToleranceMs: STREAM_GAP_TOLERANCE_MS,
           slotSummaries: stream.slot_summaries || 0,
         },
         dumps: { episodes: dumps.episodes || 0, mints: dumps.mints || 0 },
@@ -621,7 +647,7 @@ function exportResearchWindow({ sourcePath, destinationPath, startMs, endMs, sch
 
   return {
     formatVersion: 2,
-    mode: 'CONSISTENT_READ_TRANSACTION_24H_WINDOW',
+    mode: 'CONSISTENT_READ_TRANSACTION_WINDOW',
     createdAtMs: Date.now(),
     range: {
       startMs, endMs,

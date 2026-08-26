@@ -13,6 +13,10 @@ function configuration(overrides = {}) {
     maxPendingWrites: 5_000,
     minDiskFreeBytes: 10 * 1024 ** 3,
     minDiskFreePct: 10,
+    minimumJoinSamples: 100,
+    minimumJoinRatePct: 90,
+    recoverableConsecutiveChecks: 2,
+    recoveryCooldownMs: 120_000,
     fatalConsecutiveChecks: 3,
     ...overrides,
   };
@@ -130,20 +134,73 @@ test('lightweight ingestion detects sustained log and status join loss', () => {
   const state = healthy(now);
   Object.assign(state.stream, {
     receivesFullTransactionMetadata: false,
-    logNotifications: 1_000,
-    transactionStatuses: 1_000,
-    joinedLightweightTransactions: 500,
+    logStatusJoinMatureSamples: 1_000,
     logStatusJoinRatePct: 50,
   });
   const monitor = new RuntimeHealthMonitor({
     config: configuration(),
-    healthProvider: () => state,
+    healthProvider: () => ({
+      ...state,
+      stream: {
+        ...state.stream,
+        connectedAtMs: now - 10_000,
+        lastMessageAtMs: now - 100,
+        lastLogAtMs: now - 100,
+        lastStatusAtMs: now - 100,
+      },
+    }),
     logger: { info: () => {}, warn: () => {}, error: () => {} },
     now: () => now,
   });
   const result = monitor.check();
   assert.equal(result.status, 'DEGRADED');
   assert.deepEqual(result.issues, ['LIGHTWEIGHT_JOIN_RATE_LOW_50.00PCT']);
+  assert.deepEqual(result.recoverableIssues, ['LIGHTWEIGHT_JOIN_RATE_LOW_50.00PCT']);
+  assert.deepEqual(result.fatalIssues, []);
+  assert.equal(result.fatalTriggered, false);
+});
+
+test('low join quality requests a targeted recovery and never becomes process-fatal', async () => {
+  let now = 5_500_000;
+  let recoveries = 0;
+  let fatals = 0;
+  const state = healthy(now);
+  Object.assign(state.stream, {
+    receivesFullTransactionMetadata: false,
+    logStatusJoinMatureSamples: 1_000,
+    logStatusJoinRatePct: 5,
+  });
+  const monitor = new RuntimeHealthMonitor({
+    config: configuration(),
+    healthProvider: () => ({
+      ...state,
+      stream: {
+        ...state.stream,
+        connectedAtMs: now - 10_000,
+        lastMessageAtMs: now - 100,
+        lastLogAtMs: now - 100,
+        lastStatusAtMs: now - 100,
+      },
+    }),
+    onRecoverable: () => { recoveries += 1; },
+    onFatal: () => { fatals += 1; },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => now,
+  });
+  monitor.check();
+  now += 60_000;
+  monitor.check();
+  await Promise.resolve();
+  assert.equal(recoveries, 1);
+  assert.equal(fatals, 0);
+  assert.equal(monitor.health().recoveryTriggers, 1);
+  for (let index = 0; index < 4; index += 1) {
+    now += 60_000;
+    monitor.check();
+  }
+  await Promise.resolve();
+  assert.equal(fatals, 0, 'recoverable join loss must not request a systemd restart');
+  assert.equal(monitor.health().fatalTriggered, false);
 });
 
 test('lightweight ingestion detects one-sided stream silence', () => {

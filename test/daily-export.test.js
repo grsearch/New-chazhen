@@ -27,6 +27,13 @@ test('daily export keeps a consistent 24-hour research window', () => {
   `);
   trade.run(startMs - 1, 0, 'old-trade', 'STRICT', 'BUY');
   trade.run(startMs, 0, 'inside-trade', 'STRICT', 'SELL');
+  const slotSummary = db.prepare(`
+    INSERT INTO slot_summaries(
+      slot,first_received_at_ms,last_received_at_ms,event_count,transaction_count
+    ) VALUES(?,?,?,?,?)
+  `);
+  slotSummary.run(10, startMs + 1_000, startMs + 2_000, 1, 1);
+  slotSummary.run(11, startMs + 12_000, startMs + 13_000, 1, 1);
 
   const dump = db.prepare(`
     INSERT INTO dump_events(
@@ -82,6 +89,13 @@ test('daily export keeps a consistent 24-hour research window', () => {
   assert.equal(result.analysisReadiness.liveTradingDecision, 'TRADING_DISABLED');
   assert.equal(result.analysisReadiness.ingestion.tradeRowsByMode.UNKNOWN, 1);
   assert.equal(result.analysisReadiness.ingestion.dumpEpisodesByMode.UNKNOWN, 1);
+  assert.equal(result.analysisReadiness.stream.maximumObservedGapMs, 10_000);
+  assert.equal(result.analysisReadiness.stream.leadingGapMs, 1_000);
+  assert.equal(result.analysisReadiness.stream.internalMissingMs, 5_000);
+  assert.equal(result.analysisReadiness.stream.trailingGapMs, endMs - startMs - 13_000);
+  assert.equal(result.analysisReadiness.stream.significantGapCount, 1);
+  assert.equal(result.analysisReadiness.stream.coverageHours, 7_000 / 3_600_000);
+  assert.equal(result.analysisReadiness.stream.observedSpanHours, 12_000 / 3_600_000);
   assert.ok(result.analysisReadiness.gates.some((gate) => !gate.passed));
   const exported = new Database(destination, { readonly: true, fileMustExist: true });
   assert.deepEqual(exported.prepare('SELECT signature FROM trades').all(), [{ signature: 'inside-trade' }]);

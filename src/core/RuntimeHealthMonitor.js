@@ -10,6 +10,7 @@ class RuntimeHealthMonitor {
   constructor({
     config,
     healthProvider,
+    onRecoverable = () => {},
     onFatal = () => {},
     logger = console,
     now = () => Date.now(),
@@ -18,6 +19,7 @@ class RuntimeHealthMonitor {
   }) {
     this.config = config;
     this.healthProvider = healthProvider;
+    this.onRecoverable = onRecoverable;
     this.onFatal = onFatal;
     this.logger = logger;
     this.now = now;
@@ -31,10 +33,16 @@ class RuntimeHealthMonitor {
     this.lastStoreErrors = null;
     this.status = 'STOPPED';
     this.issues = [];
+    this.recoverableIssues = [];
+    this.fatalIssues = [];
+    this.lastRecoveryAtMs = null;
     this.metrics = {
       checks: 0,
       unhealthyChecks: 0,
       consecutiveUnhealthy: 0,
+      consecutiveRecoverable: 0,
+      consecutiveFatal: 0,
+      recoveryTriggers: 0,
       providerErrors: 0,
       fatalTriggers: 0,
     };
@@ -69,24 +77,41 @@ class RuntimeHealthMonitor {
       this.metrics.providerErrors += 1;
       componentHealth = null;
       this.issues = [`HEALTH_PROVIDER_ERROR:${error.message}`];
+      this.recoverableIssues = [];
+      this.fatalIssues = [...this.issues];
     }
-    if (componentHealth) this.issues = this._evaluate(componentHealth, now);
+    if (componentHealth) {
+      const evaluation = this._evaluate(componentHealth, now);
+      this.issues = evaluation.issues;
+      this.recoverableIssues = evaluation.recoverableIssues;
+      this.fatalIssues = evaluation.fatalIssues;
+    }
 
     const graceElapsed = now - this.startedAtMs >= this.config.startupGraceMs;
     if (!graceElapsed) {
       this.status = 'STARTING';
       this.metrics.consecutiveUnhealthy = 0;
+      this.metrics.consecutiveRecoverable = 0;
+      this.metrics.consecutiveFatal = 0;
     } else if (this.issues.length) {
       this.status = 'DEGRADED';
       this.metrics.unhealthyChecks += 1;
       this.metrics.consecutiveUnhealthy += 1;
+      this.metrics.consecutiveRecoverable = this.recoverableIssues.length
+        ? this.metrics.consecutiveRecoverable + 1 : 0;
+      this.metrics.consecutiveFatal = this.fatalIssues.length
+        ? this.metrics.consecutiveFatal + 1 : 0;
       this.logger.warn?.(
-        `[Health] DEGRADED ${this.metrics.consecutiveUnhealthy}/${this.config.fatalConsecutiveChecks}: ${this.issues.join(', ')}`,
+        `[Health] DEGRADED recoverable=${this.metrics.consecutiveRecoverable}`
+        + `/${this.config.recoverableConsecutiveChecks} fatal=${this.metrics.consecutiveFatal}`
+        + `/${this.config.fatalConsecutiveChecks}: ${this.issues.join(', ')}`,
       );
     } else {
       this.status = 'HEALTHY';
       this.lastHealthyAtMs = now;
       this.metrics.consecutiveUnhealthy = 0;
+      this.metrics.consecutiveRecoverable = 0;
+      this.metrics.consecutiveFatal = 0;
       if (this.lastHealthyLogAtMs == null
         || now - this.lastHealthyLogAtMs >= this.config.healthyLogIntervalMs) {
         const stream = componentHealth.stream || {};
@@ -98,8 +123,25 @@ class RuntimeHealthMonitor {
       }
     }
 
+    const recoveryCooldownElapsed = this.lastRecoveryAtMs == null
+      || now - this.lastRecoveryAtMs >= this.config.recoveryCooldownMs;
+    if (this.metrics.consecutiveRecoverable >= this.config.recoverableConsecutiveChecks
+      && recoveryCooldownElapsed) {
+      this.lastRecoveryAtMs = now;
+      this.metrics.recoveryTriggers += 1;
+      this.metrics.consecutiveRecoverable = 0;
+      const snapshot = this.health();
+      try {
+        Promise.resolve(this.onRecoverable(snapshot)).catch((error) => {
+          this.logger.error?.(`[Health] recovery handler failed: ${error.message}`);
+        });
+      } catch (error) {
+        this.logger.error?.(`[Health] recovery handler failed: ${error.message}`);
+      }
+    }
+
     if (!this.fatalTriggered
-      && this.metrics.consecutiveUnhealthy >= this.config.fatalConsecutiveChecks) {
+      && this.metrics.consecutiveFatal >= this.config.fatalConsecutiveChecks) {
       this.fatalTriggered = true;
       this.metrics.fatalTriggers += 1;
       const snapshot = this.health();
@@ -116,6 +158,7 @@ class RuntimeHealthMonitor {
 
   _evaluate(health, now) {
     const issues = [];
+    const recoverableIssues = [];
     const stream = health.stream || {};
     const store = health.store || {};
     if (stream.state !== 'CONNECTED') issues.push(`STREAM_${stream.state || 'UNKNOWN'}`);
@@ -125,14 +168,15 @@ class RuntimeHealthMonitor {
     else if (now - streamAnchor > this.config.maxEventStaleMs) {
       issues.push(`STREAM_STALE_${Math.max(0, now - streamAnchor)}MS`);
     }
-    const logNotifications = finite(stream.logNotifications, 0);
-    const transactionStatuses = finite(stream.transactionStatuses, 0);
+    const matureJoinSamples = finite(stream.logStatusJoinMatureSamples, 0);
     const joinRatePct = finite(stream.logStatusJoinRatePct);
     if (stream.receivesFullTransactionMetadata === false
-      && Math.min(logNotifications, transactionStatuses) >= 100
-      && (joinRatePct == null || joinRatePct < 90)) {
-      issues.push(`LIGHTWEIGHT_JOIN_RATE_LOW_${joinRatePct == null
-        ? 'UNKNOWN' : joinRatePct.toFixed(2)}PCT`);
+      && matureJoinSamples >= this.config.minimumJoinSamples
+      && (joinRatePct == null || joinRatePct < this.config.minimumJoinRatePct)) {
+      const issue = `LIGHTWEIGHT_JOIN_RATE_LOW_${joinRatePct == null
+        ? 'UNKNOWN' : joinRatePct.toFixed(2)}PCT`;
+      issues.push(issue);
+      recoverableIssues.push(issue);
     }
     if (stream.receivesFullTransactionMetadata === false) {
       const logAnchor = finite(stream.lastLogAtMs, finite(stream.connectedAtMs));
@@ -165,7 +209,12 @@ class RuntimeHealthMonitor {
       const freePct = diskFreePct == null ? 'UNKNOWN' : diskFreePct.toFixed(2);
       issues.push(`DISK_LOW_${freeGb}GB_${freePct}PCT`);
     }
-    return issues;
+    const recoverable = new Set(recoverableIssues);
+    return {
+      issues,
+      recoverableIssues,
+      fatalIssues: issues.filter((issue) => !recoverable.has(issue)),
+    };
   }
 
   health() {
@@ -176,6 +225,9 @@ class RuntimeHealthMonitor {
       lastCheckAtMs: this.lastCheckAtMs,
       lastHealthyAtMs: this.lastHealthyAtMs,
       issues: [...this.issues],
+      recoverableIssues: [...this.recoverableIssues],
+      fatalIssues: [...this.fatalIssues],
+      lastRecoveryAtMs: this.lastRecoveryAtMs,
       fatalTriggered: this.fatalTriggered,
       checkIntervalMs: this.config.checkIntervalMs,
       maxEventStaleMs: this.config.maxEventStaleMs,
@@ -183,6 +235,10 @@ class RuntimeHealthMonitor {
       minDiskFreeBytes: this.config.minDiskFreeBytes,
       minDiskFreePct: this.config.minDiskFreePct,
       fatalConsecutiveChecks: this.config.fatalConsecutiveChecks,
+      recoverableConsecutiveChecks: this.config.recoverableConsecutiveChecks,
+      recoveryCooldownMs: this.config.recoveryCooldownMs,
+      minimumJoinSamples: this.config.minimumJoinSamples,
+      minimumJoinRatePct: this.config.minimumJoinRatePct,
       ...this.metrics,
     };
   }

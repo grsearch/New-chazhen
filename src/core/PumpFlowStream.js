@@ -78,11 +78,15 @@ function nonnegativeInteger(value) {
 }
 
 class PumpFlowStream extends EventEmitter {
-  constructor({ config, connectionFactory = null, logsConnectionFactory = null }) {
+  constructor({
+    config, connectionFactory = null, logsConnectionFactory = null,
+    now = () => Date.now(),
+  }) {
     super();
     this.config = config;
     this.connectionFactory = connectionFactory;
     this.logsConnectionFactory = logsConnectionFactory;
+    this.now = now;
     this.running = false;
     this.client = null;
     this.stream = null;
@@ -99,12 +103,15 @@ class PumpFlowStream extends EventEmitter {
     this.seen = new Map();
     this.pendingLogs = new Map();
     this.pendingStatuses = new Map();
+    this.joinQualityBuckets = new Map();
+    this.joinQualityStartedAtMs = this.now();
     this.metrics = {
       received: 0,
       fullTransactions: 0,
       logNotifications: 0,
       transactionStatuses: 0,
       joinedLightweightTransactions: 0,
+      matchedLightweightPairs: 0,
       unmatchedLogsExpired: 0,
       unmatchedStatusesExpired: 0,
       slotMismatches: 0,
@@ -112,6 +119,7 @@ class PumpFlowStream extends EventEmitter {
       approximateStatusBytes: 0,
       duplicates: 0,
       reconnects: 0,
+      qualityReconnects: 0,
       errors: 0,
     };
   }
@@ -135,6 +143,7 @@ class PumpFlowStream extends EventEmitter {
   async _connect(index, reason) {
     if (!this.running) return;
     await this._close();
+    this._resetJoinQuality(this.now());
     this.endpointIndex = index % this.config.stream.endpoints.length;
     const endpoint = this.config.stream.endpoints[this.endpointIndex];
     this.emit('state', this.health({ state: 'CONNECTING', reason }));
@@ -148,7 +157,7 @@ class PumpFlowStream extends EventEmitter {
       this.stream.on('error', (error) => this._unavailable(error, 'STREAM_ERROR'));
       this.stream.on('end', () => this._unavailable(new Error('stream ended'), 'STREAM_END'));
       this.stream.on('close', () => this._unavailable(new Error('stream closed'), 'STREAM_CLOSE'));
-      this.connectedAtMs = Date.now();
+      this.connectedAtMs = this.now();
       this.lastMessageAtMs = null;
       this.lastLogAtMs = null;
       this.lastStatusAtMs = null;
@@ -189,7 +198,7 @@ class PumpFlowStream extends EventEmitter {
   }
 
   _onMessage(message) {
-    const receivedAtMs = Date.now();
+    const receivedAtMs = this.now();
     this.lastMessageAtMs = receivedAtMs;
     if (this._isLightweight()) {
       const status = message?.transactionStatus || message?.transaction_status;
@@ -229,7 +238,7 @@ class PumpFlowStream extends EventEmitter {
   }
 
   _onLogNotification(value, context = {}) {
-    const receivedAtMs = Date.now();
+    const receivedAtMs = this.now();
     this.lastMessageAtMs = receivedAtMs;
     this.lastLogAtMs = receivedAtMs;
     if (!value || value.err || !value.signature || !Array.isArray(value.logs)) return;
@@ -273,11 +282,15 @@ class PumpFlowStream extends EventEmitter {
     }
     this.pendingLogs.delete(signature);
     this.pendingStatuses.delete(signature);
+    const outcomeAtMs = Math.min(logs.receivedAtMs, status.receivedAtMs);
     if (logs.slot != null && status.slot != null && logs.slot !== status.slot) {
       this.metrics.slotMismatches += 1;
+      this._recordJoinOutcome('slotMismatches', outcomeAtMs);
       this._expirePairs(now);
       return;
     }
+    this.metrics.matchedLightweightPairs += 1;
+    this._recordJoinOutcome('joined', outcomeAtMs);
     if (!this._first(signature, now)) {
       this.metrics.duplicates += 1;
       return;
@@ -305,12 +318,90 @@ class PumpFlowStream extends EventEmitter {
       if (row.expiresAtMs > now && this.pendingLogs.size <= limit) continue;
       this.pendingLogs.delete(signature);
       this.metrics.unmatchedLogsExpired += 1;
+      this._recordJoinOutcome('unmatchedLogs', row.receivedAtMs);
     }
     for (const [signature, row] of this.pendingStatuses) {
       if (row.expiresAtMs > now && this.pendingStatuses.size <= limit) continue;
       this.pendingStatuses.delete(signature);
       this.metrics.unmatchedStatusesExpired += 1;
+      this._recordJoinOutcome('unmatchedStatuses', row.receivedAtMs);
     }
+    this._pruneJoinQuality(now);
+  }
+
+  _joinTtlMs() {
+    return Math.max(1_000, Number(this.config.stream.joinTtlMs) || 30_000);
+  }
+
+  _joinQualityWindowMs() {
+    return Math.max(60_000, Number(this.config.stream.joinQualityWindowMs) || 300_000);
+  }
+
+  _joinQualityBucketMs() {
+    return Math.max(250, Number(this.config.stream.joinQualityBucketMs) || 1_000);
+  }
+
+  _resetJoinQuality(now) {
+    this.joinQualityBuckets.clear();
+    this.joinQualityStartedAtMs = now;
+  }
+
+  _recordJoinOutcome(kind, atMs) {
+    const bucketMs = this._joinQualityBucketMs();
+    const bucketAtMs = Math.floor(atMs / bucketMs) * bucketMs;
+    const bucket = this.joinQualityBuckets.get(bucketAtMs) || {
+      joined: 0,
+      unmatchedLogs: 0,
+      unmatchedStatuses: 0,
+      slotMismatches: 0,
+    };
+    bucket[kind] += 1;
+    this.joinQualityBuckets.set(bucketAtMs, bucket);
+  }
+
+  _pruneJoinQuality(now) {
+    const keepAfter = now - this._joinQualityWindowMs()
+      - this._joinTtlMs() - this._joinQualityBucketMs();
+    for (const bucketAtMs of this.joinQualityBuckets.keys()) {
+      if (bucketAtMs < keepAfter) this.joinQualityBuckets.delete(bucketAtMs);
+    }
+  }
+
+  _joinQuality(now) {
+    this._pruneJoinQuality(now);
+    const ttlMs = this._joinTtlMs();
+    const windowMs = this._joinQualityWindowMs();
+    const bucketMs = this._joinQualityBucketMs();
+    const matureBeforeMs = now - ttlMs;
+    const windowStartMs = Math.max(
+      this.joinQualityStartedAtMs ?? -Infinity,
+      matureBeforeMs - windowMs,
+    );
+    const totals = {
+      joined: 0, unmatchedLogs: 0, unmatchedStatuses: 0, slotMismatches: 0,
+    };
+    for (const [bucketAtMs, bucket] of this.joinQualityBuckets) {
+      if (bucketAtMs < windowStartMs || bucketAtMs + bucketMs > matureBeforeMs) continue;
+      for (const key of Object.keys(totals)) totals[key] += bucket[key] || 0;
+    }
+    const logSamples = totals.joined + totals.unmatchedLogs + totals.slotMismatches;
+    const statusSamples = totals.joined + totals.unmatchedStatuses + totals.slotMismatches;
+    const logRatePct = logSamples > 0 ? totals.joined / logSamples * 100 : null;
+    const statusRatePct = statusSamples > 0 ? totals.joined / statusSamples * 100 : null;
+    const ratePct = logRatePct == null || statusRatePct == null
+      ? null : Math.min(logRatePct, statusRatePct);
+    return {
+      ratePct,
+      matureSamples: Math.max(logSamples, statusSamples),
+      logRatePct,
+      statusRatePct,
+      logSamples,
+      statusSamples,
+      windowMs,
+      ttlMs,
+      matureBeforeMs,
+      ...totals,
+    };
   }
 
   _first(signature, now) {
@@ -326,9 +417,9 @@ class PumpFlowStream extends EventEmitter {
     return true;
   }
 
-  _unavailable(error, phase) {
-    if (!this.running || this.reconnectTimer) return;
-    this.metrics.errors += 1;
+  _unavailable(error, phase, { countError = true } = {}) {
+    if (!this.running || this.reconnectTimer) return false;
+    if (countError) this.metrics.errors += 1;
     this.retry += 1;
     const delay = Math.min(
       this.config.stream.reconnectMaxMs,
@@ -343,13 +434,25 @@ class PumpFlowStream extends EventEmitter {
       this._connect(next, phase).catch((connectError) => this._unavailable(connectError, 'RECONNECT_ERROR'));
     }, delay);
     if (this.reconnectTimer.unref) this.reconnectTimer.unref();
+    return true;
+  }
+
+  requestReconnect(reason = 'QUALITY_RECOVERY') {
+    const scheduled = this._unavailable(
+      new Error(`controlled stream recovery requested: ${reason}`),
+      reason,
+      { countError: false },
+    );
+    if (scheduled) this.metrics.qualityReconnects += 1;
+    return scheduled;
   }
 
   _startWatchdog() {
     this.watchdog = setInterval(() => {
       if (!this.running || !this.connectedAtMs || this.reconnectTimer) return;
-      const now = Date.now();
+      const now = this.now();
       if (this._isLightweight()) {
+        this._expirePairs(now);
         const logAnchor = this.lastLogAtMs || this.connectedAtMs;
         const statusAnchor = this.lastStatusAtMs || this.connectedAtMs;
         if (now - logAnchor >= this.config.stream.staleTimeoutMs) {
@@ -392,10 +495,9 @@ class PumpFlowStream extends EventEmitter {
   health(extra = {}) {
     const includesPumpLifecycle = Boolean(this.config.stream.includePumpLifecycle);
     const lightweight = this._isLightweight();
-    const joinDenominator = Math.min(
-      this.metrics.logNotifications,
-      this.metrics.transactionStatuses,
-    );
+    const now = this.now();
+    if (lightweight) this._expirePairs(now);
+    const joinQuality = lightweight ? this._joinQuality(now) : null;
     return {
       mode: lightweight
         ? 'LIGHTWEIGHT_PUMPSWAP_LOGS_PLUS_STATUS'
@@ -409,8 +511,15 @@ class PumpFlowStream extends EventEmitter {
       exactMigrationTimestamps: !lightweight && includesPumpLifecycle,
       receivesFullTransactionMetadata: !lightweight,
       pendingLogStatusJoins: this.pendingLogs.size + this.pendingStatuses.size,
-      logStatusJoinRatePct: lightweight && joinDenominator > 0
-        ? this.metrics.joinedLightweightTransactions / joinDenominator * 100 : null,
+      logStatusJoinRatePct: joinQuality?.ratePct ?? null,
+      logStatusJoinMatureSamples: joinQuality?.matureSamples || 0,
+      logStatusLogCoveragePct: joinQuality?.logRatePct ?? null,
+      logStatusStatusCoveragePct: joinQuality?.statusRatePct ?? null,
+      logStatusLogMatureSamples: joinQuality?.logSamples || 0,
+      logStatusStatusMatureSamples: joinQuality?.statusSamples || 0,
+      logStatusJoinWindowMs: joinQuality?.windowMs || null,
+      logStatusJoinTtlMs: joinQuality?.ttlMs || null,
+      joinQualityStartedAtMs: this.joinQualityStartedAtMs,
       approximateLogMegabytes: this.metrics.approximateLogBytes / 1_000_000,
       approximatePayloadMegabytes:
         (this.metrics.approximateLogBytes + this.metrics.approximateStatusBytes) / 1_000_000,

@@ -131,6 +131,12 @@ async function main() {
   runtimeHealth = new RuntimeHealthMonitor({
     config: config.health,
     healthProvider: componentHealth,
+    onRecoverable: (snapshot) => {
+      console.warn(`[Health] RECOVERY: ${snapshot.recoverableIssues.join(', ')}`);
+      if (stopping) return;
+      const requested = stream.requestReconnect('HEALTH_JOIN_QUALITY_RECOVERY');
+      if (!requested) console.warn('[Health] stream recovery already in progress');
+    },
     onFatal: async (snapshot) => {
       console.error(`[Health] FATAL: ${snapshot.issues.join(', ')}`);
       if (!config.health.exitOnFatal || stopping) return;
