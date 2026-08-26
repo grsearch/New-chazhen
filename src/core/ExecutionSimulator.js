@@ -3,6 +3,7 @@
 const {
   quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
 } = require('./AmmQuote');
+const { assessTradeDataQuality } = require('./TradeDataQuality');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -33,14 +34,16 @@ class ExecutionSimulator {
 
   schedule(confirmation) {
     const created = [];
-    if (!(Number(confirmation?.snapshot?.slotDelta) > 0)) {
+    if (!(Number(confirmation?.snapshot?.slotDelta) > 0) && !confirmation?.allowSameSlotTrigger) {
       this.metrics.blockedSameSlot += 1;
       return created;
     }
-    for (const entry of this.config.entryVariants) {
-      for (const positionSol of this.config.positionSizesSol) {
-        for (const exit of this.config.exitProfiles) {
-          if (!this._combinationAllowed(entry.id, positionSol, exit.id)) continue;
+    const plan = confirmation.executionPlan || this.config;
+    const planTxFeeSol = transactionFeeSol(plan);
+    for (const entry of plan.entryVariants) {
+      for (const positionSol of plan.positionSizesSol) {
+        for (const exit of plan.exitProfiles) {
+          if (!this._combinationAllowed(plan, entry.id, positionSol, exit.id)) continue;
           const simulationId = [
             confirmation.confirmationId,
             entry.id,
@@ -60,16 +63,19 @@ class ExecutionSimulator {
             exitProfileId: exit.id,
             exitProfile: exit,
             positionSol,
-            quoteModel: this.config.quoteModel,
+            quoteModel: plan.quoteModel,
             status: 'PENDING_ENTRY',
             rejectionReason: null,
             confirmedAtMs: confirmation.confirmedAtMs,
             confirmationSlot: confirmation.slot,
             requestedEntryAtMs,
-            entryDeadlineAtMs: confirmation.confirmedAtMs + this.config.entryTimeoutMs,
+            entryDeadlineAtMs: confirmation.confirmedAtMs + plan.entryTimeoutMs,
             dump: confirmation.dump,
-            entryFeeSol: this.txFeeSol,
-            exitFeeSol: this.txFeeSol,
+            entryReferenceTrade: confirmation.entryReferenceTrade || null,
+            entryDataQualityConfig: confirmation.entryDataQualityConfig || null,
+            executionPlan: plan,
+            entryFeeSol: planTxFeeSol,
+            exitFeeSol: planTxFeeSol,
             failedTransactionFeeSol: 0,
             mfeNetPct: null,
             maeNetPct: null,
@@ -107,12 +113,24 @@ class ExecutionSimulator {
           continue;
         }
         if (!this._entryEligible(simulation, trade, at)) continue;
+        if (simulation.entryReferenceTrade) {
+          const quality = assessTradeDataQuality(
+            trade, simulation.entryDataQualityConfig, simulation.entryReferenceTrade,
+          );
+          if (quality.status !== 'TRUSTED') {
+            this._rejectEntry(simulation, 'DATA_QUALITY_REJECTED_ENTRY', at);
+            changed.push(simulation);
+            continue;
+          }
+        }
+        const plan = simulation.executionPlan || this.config;
         const capacity = quoteImmediateRoundTrip(trade, simulation.positionSol, {
-          buySlippageBps: this.config.buySlippageBps,
-          sellSlippageBps: this.config.sellSlippageBps,
+          buySlippageBps: plan.buySlippageBps,
+          sellSlippageBps: plan.sellSlippageBps,
         });
         if (!capacity.available) continue;
-        const capacityNetProceedsSol = capacity.proceedsSol - this.txFeeSol * 2;
+        const capacityNetProceedsSol = capacity.proceedsSol
+          - simulation.entryFeeSol - simulation.exitFeeSol;
         const capacityRoundTripLossPct = Math.max(
           0,
           (1 - capacityNetProceedsSol / simulation.positionSol) * 100,
@@ -121,8 +139,8 @@ class ExecutionSimulator {
           entryCapacityRoundTripLossPct: capacityRoundTripLossPct,
           entryCapacityExitLiquidityUsagePct: capacity.exitLiquidityUsagePct,
         });
-        const maxEntryUsage = finite(this.config.maxEntryLiquidityUsagePct, Infinity);
-        const maxExitUsage = finite(this.config.maxExitLiquidityUsagePct, Infinity);
+        const maxEntryUsage = finite(plan.maxEntryLiquidityUsagePct, Infinity);
+        const maxExitUsage = finite(plan.maxExitLiquidityUsagePct, Infinity);
         if (capacity.entryLiquidityUsagePct > maxEntryUsage
           || capacity.exitLiquidityUsagePct > maxExitUsage) {
           this._rejectEntry(simulation, 'INSUFFICIENT_ROUND_TRIP_LIQUIDITY', at);
@@ -130,7 +148,7 @@ class ExecutionSimulator {
           changed.push(simulation);
           continue;
         }
-        const maxRoundTripLoss = finite(this.config.maxImmediateRoundTripLossPct, Infinity);
+        const maxRoundTripLoss = finite(plan.maxImmediateRoundTripLossPct, Infinity);
         if (capacityRoundTripLossPct > maxRoundTripLoss) {
           this._rejectEntry(simulation, 'ROUND_TRIP_COST_TOO_HIGH', at);
           this.metrics.roundTripCostTooHigh += 1;
@@ -165,7 +183,7 @@ class ExecutionSimulator {
       if (simulation.status === 'PENDING_EXIT') {
         if (at < simulation.requestedExitAtMs) continue;
         const sell = quoteSell(trade, simulation.tokenUnits, {
-          slippageBps: this.config.sellSlippageBps,
+          slippageBps: (simulation.executionPlan || this.config).sellSlippageBps,
         });
         if (!sell.available) continue;
         this._close(simulation, trade, at, sell);
@@ -175,7 +193,7 @@ class ExecutionSimulator {
 
       if (simulation.status !== 'OPEN' || at <= simulation.entryAtMs) continue;
       const sell = quoteSell(trade, simulation.tokenUnits, {
-        slippageBps: this.config.sellSlippageBps,
+        slippageBps: (simulation.executionPlan || this.config).sellSlippageBps,
       });
       if (!sell.available) continue;
       const returns = this._returns(simulation, sell.proceedsSol);
@@ -187,7 +205,14 @@ class ExecutionSimulator {
       simulation.lastExecutableQuoteAtMs = at;
       simulation.updatedAtMs = at;
       const reason = this._exitReason(simulation, recovery, returns.netReturnPct, at);
-      if (reason) this._triggerExit(simulation, reason, at);
+      if (reason) {
+        this._triggerExit(simulation, reason, at);
+        if (simulation.requestedExitAtMs <= at) {
+          this._close(simulation, trade, at, sell);
+          changed.push(simulation);
+          continue;
+        }
+      }
       this.store?.updateSimulation?.(simulation);
       changed.push(simulation);
     }
@@ -212,7 +237,8 @@ class ExecutionSimulator {
         this._finish(simulation);
         changed.push(simulation);
       } else if (simulation.status === 'OPEN'
-        && now > simulation.maxExitAtMs + this.config.exitGraceMs) {
+        && now > simulation.maxExitAtMs
+          + finite((simulation.executionPlan || this.config).exitGraceMs, 0)) {
         simulation.status = 'NO_EXIT';
         simulation.rejectionReason = 'NO_TRADE_AT_OR_AFTER_EXIT_HORIZON';
         simulation.exitTargetAtMs = simulation.maxExitAtMs;
@@ -234,8 +260,8 @@ class ExecutionSimulator {
     return at >= simulation.requestedEntryAtMs;
   }
 
-  _combinationAllowed(entryVariantId, positionSol, exitProfileId) {
-    const grid = this.config.combinationGrid;
+  _combinationAllowed(plan, entryVariantId, positionSol, exitProfileId) {
+    const grid = plan.combinationGrid;
     if (!Array.isArray(grid) || !grid.length) return true;
     return grid.some((row) => Number(row.positionSol) === Number(positionSol)
       && row.entryVariantIds?.includes(entryVariantId)
@@ -261,13 +287,15 @@ class ExecutionSimulator {
   }
 
   _triggerExit(simulation, reason, at) {
+    const plan = simulation.executionPlan || this.config;
     simulation.status = 'PENDING_EXIT';
     simulation.exitReason = reason;
     simulation.exitTriggeredAtMs = at;
     simulation.exitTargetAtMs = reason === 'FIXED_HOLD'
       ? simulation.entryAtMs + simulation.exitProfile.holdMs : at;
-    simulation.requestedExitAtMs = at + this.config.exitDelayMs;
-    simulation.exitDeadlineAtMs = simulation.requestedExitAtMs + this.config.exitTimeoutMs;
+    simulation.requestedExitAtMs = at + finite(plan.exitDelayMs, 0);
+    simulation.exitDeadlineAtMs = simulation.requestedExitAtMs
+      + finite(plan.exitTimeoutMs, 2_000);
     simulation.updatedAtMs = at;
   }
 

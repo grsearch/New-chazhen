@@ -157,9 +157,12 @@ function renderCohorts(){
     const model=String(r.quoteModel||'').split('_').at(-1)||'—';
     const independent=r.resolvedEpisodes??r.resolved??0;
     const sample=independent<30?'<span class="sample">样本不足</span>':'';
-    return `<tr><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code> <span class="label">${html(model)}</span>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="12">暂无策略组合数据</td></tr>';
-  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>平均净收益</th><th>PF</th><th>最差5%</th></tr>'+body;
+    const soft=combinedScenario(r.combinedScenarios,-15,0.01);
+    const hard=combinedScenario(r.combinedScenarios,-100,0.01);
+    const isCausal=String(r.recoveryProfileId||'').startsWith('R2-ABS');
+    return `<tr class="${isCausal?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code> <span class="label">${html(model)}</span>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(soft),metric(soft)>0?'good':'bad')}${cell(pct(hard),metric(hard)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="14">暂无策略组合数据</td></tr>';
+  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>CLOSED均值</th><th>NO_EXIT=-15% + Jito 0.01</th><th>NO_EXIT=-100% + Jito 0.01</th><th>PF</th><th>最差5%</th></tr>'+body;
   pager('#cohort-pager','cohort',state.cohortPage,totalPages,rows.length);
 }
 function renderShadowCohorts(){
@@ -264,6 +267,7 @@ async function refresh(){
     notices.push('<strong>速度口径：</strong>Rank#2余量按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算；仍不包含Leader排队与真实落地时间');
     notices.push('<strong>宽口径：</strong>跌幅5%–40%、Sell/Reserve≥2%、卖后Quote≥20 SOL即进入研究；R2-A1按首买≥max(0.1 SOL,砸盘额1%)标记');
     notices.push('<strong>下一Slot：</strong>N1-FB、N1-A5、N1-P2、N1-B2分别记录首个有效买入、吸收5%、反弹2%和两个独立买家的因果入场时点；这些是研究里程碑，不是实盘信号');
+    notices.push('<strong>冻结因果组：</strong>R2-ABS10-V1与R2-ABS5-D15-30-V1只使用大砸单后的首笔严格排序公开买单作为触发；入场等待触发后50/100/200/400ms或下一Slot的首个可观察储备，绝不把触发成交价当作可成交入场价');
     notices.push(`<strong>观察钱包：</strong>已记录 ${w.observations||0} 笔PumpSwap成交，其中砸盘窗口附近 ${w.aroundDumpTrades||0} 笔；复用当前PumpSwap数据流，不增加单独Helius订阅`);
     notices.push('<strong>执行测速：</strong>仅测量隔离临时签名器的本地构建、签名和序列化；交易发送硬关闭，因此发送、落地和真实排名必须显示未发送/0样本，禁止用理论值代替');
     notices.push('<strong>退出分层：</strong>1 SOL测试250/500/1000/2000ms，2/5 SOL只测试250/500ms容量敏感性；5秒/10秒救援单独列示，最终仍无报价才计NO_EXIT');

@@ -19,14 +19,15 @@
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
 4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
 5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；Rank #2按首买占砸盘额的比例标记为`R2-A1/A2/A5`，最低有效首买为`max(0.1 SOL, 砸盘额1%)`。1 SOL测试250/500/1000/2000ms，2/5 SOL只保留250/500ms容量敏感性；所有结果强制标记为不可执行理论成交。
-6. **Toxic Flow Filter**：Creator、历史毒性钱包、机械上涨和买家集中度保留为因果风险特征。研究Shadow可以保留毒性负样本，但不会把它们标为可交易候选。
-7. **N+1 Absorption Milestones**：`N1-FB/N1-A5/N1-P2/N1-B2`分别记录下一Slot首个有效买入、买入额达到砸盘额5%、价格反弹2%和两个独立买家的首次因果时点，并计算0–100吸收评分。
-8. **Execution Simulator**：每个确认最多生成16个组合；1 SOL测试0/100/250ms响应与250/500/1000/2000ms退出，2/5 SOL只测试100ms响应和250/500ms退出。等待入场期间出现二次砸盘会立即取消。
+6. **Frozen Causal Backrun**：`R2-ABS10-V1`与`R2-ABS5-D15-30-V1`只用大砸单后的首笔严格排序公开买单触发。触发成交不能作为入场报价；必须等待触发后50/100/200/400ms或下一Slot的首个公开储备，1 SOL分别测试100/250/500/1000ms退出。
+7. **Toxic Flow Filter**：Creator、历史毒性钱包、机械上涨和买家集中度保留为因果风险特征。研究Shadow可以保留毒性负样本，但冻结因果组只接收非毒性事件。
+8. **N+1 Absorption Milestones**：`N1-FB/N1-A5/N1-P2/N1-B2`分别记录下一Slot首个有效买入、买入额达到砸盘额5%、价格反弹2%和两个独立买家的首次因果时点，并计算0–100吸收评分。
+9. **Execution Simulator**：冻结因果组每个Profile生成20个组合；传统N+1确认最多生成16个组合。等待入场期间出现二次砸盘会立即取消。
 
 程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
-9. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
-10. **Minimal Dashboard**：展示宽口径事件数、吸收评分、Same-Slot排名、N+1里程碑、退出组合和观察钱包统计。真实发送被硬关闭，因此真实落地与排名样本始终明确显示为0。
-11. **Wallet Research**：默认观察`popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz`在PumpSwap中的买卖、币种和砸盘附近Slot位置。它复用全网PumpSwap程序流，不新增订阅或RPC轮询；可通过`SDBR_WATCH_WALLETS`覆盖或追加地址。
+10. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
+11. **Minimal Dashboard**：展示宽口径事件数、吸收评分、Same-Slot排名、冻结因果组、N+1里程碑、退出组合和观察钱包统计。真实发送被硬关闭，因此真实落地与排名样本始终明确显示为0。
+12. **Wallet Research**：默认观察`popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz`在PumpSwap中的买卖、币种和砸盘附近Slot位置。它复用全网PumpSwap程序流，不新增订阅或RPC轮询；可通过`SDBR_WATCH_WALLETS`覆盖或追加地址。
 
 ## 两条研究线
 
@@ -48,6 +49,14 @@ Same-Slot Shadow V2 建立以下可区分的反事实研究路径：
 - Jito敏感性仍保存每笔0/0.005/0.01/0.02 SOL档位，买入和卖出各计一次；这些只是假设成本，不代表获得指定链上排名。
 - 成交额、Quote Reserve、成交/储备比例、事件价格与储备价格偏差或相邻储备跳变超过安全阈值时，相关组合标记为`QUARANTINED`，保留审计记录但不进入收益排名。
 
+同一张Dashboard中的冻结因果验证组与上述理论Shadow分开统计：
+
+- `R2-ABS10-V1`：非毒性事件；首笔严格排序公开买单至少10 SOL；砸盘跌幅5%–40%；不设Q500门槛。
+- `R2-ABS5-D15-30-V1`：非毒性事件；首笔严格排序公开买单至少5 SOL；砸盘跌幅15%–30%；不设Q500或未来第二买单门槛。
+- 首买若不满足条件，该事件立即结束验证，禁止用后来的大买单替换首买，防止回测挑选。
+- 两组定义写死在代码中，不接受环境变量临时调参；只有下一独立时间窗口的数据可用于判断。
+- `CLOSED均值`之外，统一列出`NO_EXIT=-15%/-100% + 每笔Jito 0.01 SOL`，NO_ENTRY不承担仓位损失。
+
 所有Shadow行都写入`infrastructure_executable=0`，并标记
 `POST_EXECUTION_STREAM_NO_LANDING_GUARANTEE`。这个模型回答“如果能取得该排名，公开价格路径下收益如何”，
 不回答“现有LaserStream系统是否真的能取得该排名”。由于假设订单会改变池子状态，V2仍是公开储备路径近似，
@@ -59,7 +68,7 @@ Same-Slot Shadow V2 建立以下可区分的反事实研究路径：
 签名和序列化一笔零金额本地交易，硬编码`send_enabled=0`；`send_status=DISABLED`、
 `landing_status=NOT_SENT`、`rank_status=NOT_MEASURABLE_WITHOUT_SEND`，不接受实盘私钥，也不存在发送路径。
 
-每日导出以宽口径事件≥300、独立Mint≥150、同Slot事件≥100、下一Slot事件≥100、终态完成率≥95%
+每日导出以宽口径事件≥300、独立Mint≥150、同Slot事件≥100、下一Slot事件≥100、每个冻结因果Profile≥30个独立事件、终态完成率≥95%
 作为“可以开始统计分析”的最低门槛。达到门槛只会返回`READY_FOR_ANALYSIS / TRADING_DISABLED`，
 不会自动开启实盘；收益、NO_EXIT全损、Jito成本和时间外样本仍需另行审计。
 
@@ -68,8 +77,9 @@ Same-Slot Shadow V2 建立以下可区分的反事实研究路径：
 
 ### 并行方向：N+1 Absorption 与 Post-Dump Recovery
 
-恢复确认必须满足 `slotDelta > 0`。引擎和执行模拟器各自设有一道硬性防护，任何同 Slot 确认都不会进入
-`confirmations` 或 `simulations`。最早路径是“Slot N 砸盘 → Slot N+1 确认 → 确认后延迟报价入场”。
+N+1恢复确认必须满足 `slotDelta > 0`。引擎和执行模拟器各自设有一道硬性防护，普通恢复Profile的
+同Slot确认不会进入`simulations`。唯一例外是明确标记`FROZEN_CAUSAL_BACKRUN_V1`的首买触发器；它可以
+在Slot N记录确认，但仍必须等待触发后的延迟公开报价或下一Slot，不能在触发成交位置入场。
 
 `N1-FB/N1-A5/N1-P2/N1-B2`只允许在下一Slot首次达到条件时确认；传统`PD-R1/R2/LQ`
 继续作为更慢恢复对照。两者都不使用同Slot资金，并持续统计延迟、容量和退出成功率。
@@ -180,7 +190,7 @@ systemctl list-timers post-dump-recovery-backup.timer --all
 cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
-上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。Manifest自动检查实际Stream有效覆盖时长、首尾缺口、超过5秒的内部空洞、Schema关键字段、观测质量、宽口径事件/Mint、同Slot事件、下一Slot事件及模拟终态完成率，并单列观察钱包统计。覆盖率不再用首条到末条记录的简单跨度冒充。导出只报告`COLLECT_MORE_DATA`或`READY_FOR_ANALYSIS`，实盘决定始终为`TRADING_DISABLED`；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
+上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。Manifest自动检查实际Stream有效覆盖时长、首尾缺口、超过5秒的内部空洞、Schema关键字段、观测质量、宽口径事件/Mint、同Slot事件、下一Slot事件、两个冻结因果Profile的事件量/终态率，并直接列出各延迟×退出组合在Jito 0.01和NO_EXIT软/硬损失下的收益与PF。覆盖率不再用首条到末条记录的简单跨度冒充。导出只报告`COLLECT_MORE_DATA`或`READY_FOR_ANALYSIS`，实盘决定始终为`TRADING_DISABLED`；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
 
 ## 程序内置健康检查
@@ -214,7 +224,7 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 
 程序不再永久保存全部 PumpSwap 成交。Dump Detector 只在内存里保留检测所需的5秒历史；一旦识别到砸盘，才回填该池的砸盘前窗口，并继续保存恢复确认、Shadow 入场和退出所使用的成交。结构化字段默认完整保留，重复的 `raw_json` 默认关闭。
 
-事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；结构化研究结果不自动删除。每个砸盘事件最多新增16条Same-Slot Shadow组合；每个N+1确认最多新增16条执行模拟，避免旧版全笛卡尔积。5秒/10秒应急退出复用原组合，不新增参数行。SQLite删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
+事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；结构化研究结果不自动删除。每个砸盘事件最多新增16条Same-Slot Shadow组合；每个N+1确认最多新增16条执行模拟；冻结因果组每个Profile最多20条、重叠命中时最多40条，避免旧版全笛卡尔积。5秒/10秒应急退出复用原组合，不新增参数行。SQLite删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
 
 ```bash
 node scripts/compact-event-window-db.js \
@@ -229,13 +239,13 @@ node scripts/compact-event-window-db.js \
 - `trades`：仅限砸盘研究窗口的 AMM 事件、完整排序坐标、原始金额、储备、精度、逐笔费用和`ingestion_mode`采集口径。
 - `slot_summaries`：transaction index 覆盖与 Slot 完整性统计。
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、0–100吸收评分、生存率和二次砸盘。
-- `confirmations`：N1里程碑及传统R1/R2/LQ的确认时点、吸收评分和全部因果特征。
+- `confirmations`：N1里程碑、传统R1/R2/LQ及两个冻结因果组的触发时点、首买金额和全部因果特征。
 - `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额、接收延迟和观测级数据质量状态。
 - `same_slot_shadow_simulations`：理论Rank #1/#2入场、`R1-RAW/R2-DUST/R2-A1/A2/A5`分层、第一笔买单金额、两买单间隔、速度余量、数据质量、容量检查、快速/应急退出和扣费收益。
 - `watched_wallet_trades`：观察钱包在PumpSwap中的最小结构化成交记录，不复制完整交易元数据。
 - `candidate_excluded_mints`：仅为旧冻结候选历史数据兼容保留；新版宽口径研究默认不启用Mint排除。
 - `execution_probes`：候选首买到达热路径时，临时Keypair在本机真实完成构建、签名和序列化的耗时与负载大小；Slot结束后再校验触发交易是否确为最终链上Rank #1。发送开关受数据库约束只能为0，链上落地和排名明确记录为未发送/不可测。
-- `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
+- `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益；冻结组使用独立`quote_model=PUMPSWAP_CAUSAL_BACKRUN_FROZEN_V1`，不会和N+1混合。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
 ## 当前边界

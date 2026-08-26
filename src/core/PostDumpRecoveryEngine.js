@@ -7,6 +7,7 @@ const { ExecutionSimulator } = require('./ExecutionSimulator');
 const { SameSlotProbe } = require('./SameSlotProbe');
 const { SameSlotShadowSimulator } = require('./SameSlotShadowSimulator');
 const { DryRunExecutionProbe } = require('./DryRunExecutionProbe');
+const { CausalBackrunConfirmer } = require('./CausalBackrunConfirmer');
 
 class PostDumpRecoveryEngine {
   constructor({ config, store, now = () => Date.now() }) {
@@ -31,6 +32,13 @@ class PostDumpRecoveryEngine {
       config: config.sameSlotShadow || { enabled: false }, store,
       executionProbe: this.executionProbe, now,
     });
+    this.causalBackrun = new CausalBackrunConfirmer({
+      config: config.causalBackrun || { enabled: false, profiles: [] },
+      executionConfig: config.execution,
+      dataQualityConfig: config.sameSlotShadow || null,
+      executionProbe: this.executionProbe,
+      now,
+    });
     this.execution = new ExecutionSimulator({ config: config.execution, store, now });
     this.metrics = {
       events: 0,
@@ -41,6 +49,7 @@ class PostDumpRecoveryEngine {
       blockedSameSlotConfirmations: 0,
       sameSlotObservations: 0,
       sameSlotShadowUpdates: 0,
+      causalBackrunConfirmations: 0,
       researchTradeWrites: 0,
       watchedWalletTrades: 0,
       errors: 0,
@@ -69,7 +78,8 @@ class PostDumpRecoveryEngine {
     // pre-window in memory, so unrelated PumpSwap traffic never reaches SQLite.
     const activeResearchWindow = this.recovery.isObservingPool(event.pool)
       || this.execution.isTrackingPool(event.pool)
-      || this.sameSlotShadow.isTrackingPool(event.pool);
+      || this.sameSlotShadow.isTrackingPool(event.pool)
+      || this.causalBackrun.isTrackingPool(event.pool);
     if (activeResearchWindow) {
       this.store.recordTrade(event);
       this.metrics.researchTradeWrites += 1;
@@ -84,6 +94,12 @@ class PostDumpRecoveryEngine {
     }
     this.metrics.sameSlotShadowUpdates += this.sameSlotShadow
       .observeTrade(event, sameSlotObservations).length;
+    const causalConfirmations = this.causalBackrun.observeTrade(event);
+    for (const confirmation of causalConfirmations) {
+      this.store.insertConfirmation(confirmation);
+      this.execution.schedule(confirmation);
+      this.metrics.causalBackrunConfirmations += 1;
+    }
     for (const snapshot of recoveryResult.updates) this.store.updateDump(snapshot);
     for (const outcome of recoveryResult.toxicOutcomes) {
       this.toxicFilter.recordToxicOutcome(
@@ -110,6 +126,7 @@ class PostDumpRecoveryEngine {
       const initial = this.recovery.startEpisode(dump, toxic);
       this.sameSlotProbe.startEpisode(dump);
       this.metrics.sameSlotShadowUpdates += this.sameSlotShadow.startEpisode(dump, toxic).length;
+      this.causalBackrun.startEpisode(dump, toxic);
       this.store.updateDump(initial);
       this.metrics.dumps += 1;
       dump.toxic = toxic;
@@ -124,6 +141,7 @@ class PostDumpRecoveryEngine {
     for (const snapshot of expired) this.store.updateDump(snapshot);
     this.sameSlotProbe.advanceTime(now);
     this.sameSlotShadow.advanceTime(now);
+    this.causalBackrun.advanceTime(now);
     this.execution.advanceTime(now);
     this.store.flush();
   }
@@ -138,6 +156,7 @@ class PostDumpRecoveryEngine {
       recovery: this.recovery.health(),
       sameSlotProbe: this.sameSlotProbe.health(),
       sameSlotShadow: this.sameSlotShadow.health(),
+      causalBackrun: this.causalBackrun.health(),
       executionProbe: this.executionProbe.health(),
       execution: this.execution.health(),
     };

@@ -299,6 +299,46 @@ const config = {
       jitoTipSol: 0.01,
     }),
   },
+  causalBackrun: Object.freeze({
+    enabled: true,
+    // Frozen forward-validation cohorts.  These are intentionally not
+    // configurable through env vars, so tomorrow's sample cannot be tuned
+    // after seeing its outcome.
+    profiles: Object.freeze([
+      Object.freeze({
+        id: 'R2-ABS10-V1', minFirstBuySol: 10, minDropPct: 5, maxDropPct: 40,
+      }),
+      Object.freeze({
+        id: 'R2-ABS5-D15-30-V1', minFirstBuySol: 5, minDropPct: 15, maxDropPct: 30,
+      }),
+    ]),
+    entryVariants: Object.freeze([
+      Object.freeze({ id: 'E50', kind: 'DELAY', delayMs: 50 }),
+      Object.freeze({ id: 'E100', kind: 'DELAY', delayMs: 100 }),
+      Object.freeze({ id: 'E200', kind: 'DELAY', delayMs: 200 }),
+      Object.freeze({ id: 'E400', kind: 'DELAY', delayMs: 400 }),
+      Object.freeze({ id: 'NEXT_SLOT', kind: 'NEXT_SLOT', delayMs: 0 }),
+    ]),
+    positionSizesSol: Object.freeze([1]),
+    exitProfiles: Object.freeze([
+      Object.freeze({ id: 'H010', kind: 'FIXED', holdMs: 100 }),
+      Object.freeze({ id: 'H025', kind: 'FIXED', holdMs: 250 }),
+      Object.freeze({ id: 'H05', kind: 'FIXED', holdMs: 500 }),
+      Object.freeze({ id: 'H1', kind: 'FIXED', holdMs: 1_000 }),
+    ]),
+    combinationGrid: Object.freeze([
+      Object.freeze({
+        positionSol: 1,
+        entryVariantIds: Object.freeze(['E50', 'E100', 'E200', 'E400', 'NEXT_SLOT']),
+        exitProfileIds: Object.freeze(['H010', 'H025', 'H05', 'H1']),
+      }),
+    ]),
+    entryTimeoutMs: 2_000,
+    exitTimeoutMs: 2_000,
+    exitGraceMs: 2_000,
+    triggerRetentionMs: 2_000,
+    quoteModel: 'PUMPSWAP_CAUSAL_BACKRUN_FROZEN_V1',
+  }),
   executionProbe: {
     enabled: true,
     sendEnabled: false,

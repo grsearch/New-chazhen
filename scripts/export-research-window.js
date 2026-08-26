@@ -10,6 +10,9 @@ const CANDIDATE_PROFILE_ID = 'R2-B10-Q500-V1';
 const CANDIDATE_COHORT_STAGE = 'HOLDOUT_B10_Q500_V1';
 const CANDIDATE_PRIMARY_POSITION_SOL = 1;
 const CANDIDATE_PRIMARY_EXIT_HORIZON_MS = 250;
+const CAUSAL_BACKRUN_PROFILE_IDS = Object.freeze([
+  'R2-ABS10-V1', 'R2-ABS5-D15-30-V1',
+]);
 const STREAM_GAP_TOLERANCE_MS = 5_000;
 
 const EXPLICIT_FILTERS = Object.freeze({
@@ -77,6 +80,20 @@ const ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
     'episode_id', 'observed_at_ms', 'buy_transaction_index', 'instruction_index',
     'event_index', 'receive_lag_ms', 'buy_sol', 'price_bounce_pct', 'data_quality_status',
   ],
+  confirmations: [
+    'confirmation_id', 'episode_id', 'profile_id', 'confirmed_at_ms', 'slot',
+    'transaction_index', 'instruction_index', 'event_index', 'signature', 'slot_delta',
+    'valid_buy_sol', 'snapshot_json',
+  ],
+  simulations: [
+    'simulation_id', 'confirmation_id', 'episode_id', 'recovery_profile_id',
+    'entry_variant_id', 'entry_kind', 'entry_delay_ms', 'exit_profile_id', 'position_sol',
+    'quote_model', 'status', 'rejection_reason', 'requested_entry_at_ms',
+    'entry_deadline_at_ms', 'entry_at_ms', 'entry_slot', 'entry_signature',
+    'entry_quote_lag_ms', 'actual_entry_delay_ms', 'requested_exit_at_ms',
+    'exit_deadline_at_ms', 'exit_at_ms', 'exit_slot', 'exit_signature',
+    'exit_horizon_lag_ms', 'proceeds_sol', 'net_return_pct', 'hold_ms',
+  ],
   same_slot_shadow_simulations: [
     'episode_id', 'target_rank', 'entry_profile_id', 'cohort_stage', 'position_sol',
     'exit_horizon_ms', 'status', 'competitor_gap_ms', 'competitor_headroom_ms',
@@ -100,6 +117,7 @@ const GO_NO_GO_THRESHOLDS = Object.freeze({
   minimumNextSlotEpisodes: 100,
   minimumTerminalRowsPct: 95,
   minimumAssessedObservationPct: 90,
+  minimumCausalEpisodesPerProfile: 30,
 });
 
 function parseArgs(argv) {
@@ -222,6 +240,14 @@ function researchReadiness(databasePath, startMs, endMs) {
         probeSamples: 0, chainValidatedProbeSamples: 0, chainRejectedProbeSamples: 0,
         realLandingSamples: 0,
         realRankSamples: 0,
+      },
+      causalBackrun: {
+        profiles: CAUSAL_BACKRUN_PROFILE_IDS.map((profileId) => ({
+          profileId, episodes: 0, mints: 0, averageTriggerBuySol: null,
+          rows: 0, terminalRows: 0, terminalRowsPct: null, entryFilledRows: 0,
+          closedRows: 0, noEntryRows: 0, noExitRows: 0, closedEpisodes: 0,
+          probeSamples: 0, chainValidatedProbeSamples: 0, cohorts: [],
+        })),
       },
       ingestion: { tradeRowsByMode: {}, dumpEpisodesByMode: {} },
     };
@@ -406,6 +432,110 @@ function researchReadiness(databasePath, startMs, endMs) {
           SUM(CASE WHEN landed_rank IS NOT NULL THEN 1 ELSE 0 END) real_rank_samples
         FROM execution_probes WHERE candidate_profile_id=?
       `).get(CANDIDATE_PROFILE_ID);
+      const causalConfirmations = db.prepare(`
+        SELECT c.profile_id profileId,COUNT(DISTINCT c.episode_id) episodes,
+          COUNT(DISTINCT d.mint) mints,AVG(c.valid_buy_sol) averageTriggerBuySol
+        FROM confirmations c
+        JOIN dump_events d ON d.episode_id=c.episode_id
+        WHERE c.profile_id IN (${CAUSAL_BACKRUN_PROFILE_IDS.map(() => '?').join(',')})
+        GROUP BY c.profile_id
+      `).all(...CAUSAL_BACKRUN_PROFILE_IDS);
+      const causalSimulations = db.prepare(`
+        SELECT recovery_profile_id profileId,COUNT(*) rows,
+          SUM(CASE WHEN status IN ('CLOSED','NO_EXIT','NO_ENTRY') THEN 1 ELSE 0 END)
+            terminalRows,
+          SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entryFilledRows,
+          SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closedRows,
+          SUM(CASE WHEN status='NO_ENTRY' THEN 1 ELSE 0 END) noEntryRows,
+          SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) noExitRows,
+          COUNT(DISTINCT CASE WHEN status='CLOSED' THEN episode_id END) closedEpisodes
+        FROM simulations
+        WHERE recovery_profile_id IN (${CAUSAL_BACKRUN_PROFILE_IDS.map(() => '?').join(',')})
+        GROUP BY recovery_profile_id
+      `).all(...CAUSAL_BACKRUN_PROFILE_IDS);
+      const causalProbes = db.prepare(`
+        SELECT candidate_profile_id profileId,COUNT(*) samples,
+          SUM(CASE WHEN chain_validation_status='MATCHED_FINAL_CHAIN_RANK_1'
+            THEN 1 ELSE 0 END) chainValidatedSamples
+        FROM execution_probes
+        WHERE candidate_profile_id IN (${CAUSAL_BACKRUN_PROFILE_IDS.map(() => '?').join(',')})
+        GROUP BY candidate_profile_id
+      `).all(...CAUSAL_BACKRUN_PROFILE_IDS);
+      const causalCohortRows = db.prepare(`
+        SELECT recovery_profile_id profileId,entry_variant_id entryVariantId,
+          exit_profile_id exitProfileId,position_sol positionSol,status,
+          net_return_pct netReturnPct
+        FROM simulations
+        WHERE recovery_profile_id IN (${CAUSAL_BACKRUN_PROFILE_IDS.map(() => '?').join(',')})
+      `).all(...CAUSAL_BACKRUN_PROFILE_IDS);
+      const causalCohortGroups = new Map();
+      for (const row of causalCohortRows) {
+        const key = [row.profileId, row.entryVariantId, row.positionSol, row.exitProfileId]
+          .join(':');
+        const group = causalCohortGroups.get(key) || {
+          profileId: row.profileId, entryVariantId: row.entryVariantId,
+          positionSol: row.positionSol, exitProfileId: row.exitProfileId, rows: [],
+        };
+        group.rows.push(row);
+        causalCohortGroups.set(key, group);
+      }
+      const causalCohorts = [...causalCohortGroups.values()].map((group) => {
+        const terminal = group.rows.filter((row) => (
+          ['CLOSED', 'NO_EXIT', 'NO_ENTRY'].includes(row.status)
+        ));
+        const entered = terminal.filter((row) => ['CLOSED', 'NO_EXIT'].includes(row.status));
+        const jitoCostPct = 0.01 * 2 / Number(group.positionSol) * 100;
+        const scenarioValues = (noExitLossPct) => entered.map((row) => (
+          row.status === 'CLOSED'
+            ? Number(row.netReturnPct) - jitoCostPct
+            : noExitLossPct - jitoCostPct
+        )).filter(Number.isFinite);
+        const softValues = scenarioValues(-15);
+        const hardValues = scenarioValues(-100);
+        return {
+          profileId: group.profileId,
+          entryVariantId: group.entryVariantId,
+          positionSol: group.positionSol,
+          exitProfileId: group.exitProfileId,
+          rows: group.rows.length,
+          terminalRows: terminal.length,
+          terminalRowsPct: percentage(terminal.length, group.rows.length),
+          closedRows: terminal.filter((row) => row.status === 'CLOSED').length,
+          noEntryRows: terminal.filter((row) => row.status === 'NO_ENTRY').length,
+          noExitRows: terminal.filter((row) => row.status === 'NO_EXIT').length,
+          softNoExitLossPct: -15,
+          hardNoExitLossPct: -100,
+          jitoTipSolPerTransaction: 0.01,
+          softAverageNetReturnPct: softValues.length
+            ? softValues.reduce((sum, value) => sum + value, 0) / softValues.length : null,
+          softProfitFactor: profitFactor(softValues),
+          hardAverageNetReturnPct: hardValues.length
+            ? hardValues.reduce((sum, value) => sum + value, 0) / hardValues.length : null,
+          hardProfitFactor: profitFactor(hardValues),
+        };
+      });
+      const causalProfiles = CAUSAL_BACKRUN_PROFILE_IDS.map((profileId) => {
+        const confirmation = causalConfirmations.find((row) => row.profileId === profileId) || {};
+        const simulation = causalSimulations.find((row) => row.profileId === profileId) || {};
+        const probe = causalProbes.find((row) => row.profileId === profileId) || {};
+        return {
+          profileId,
+          episodes: confirmation.episodes || 0,
+          mints: confirmation.mints || 0,
+          averageTriggerBuySol: confirmation.averageTriggerBuySol ?? null,
+          rows: simulation.rows || 0,
+          terminalRows: simulation.terminalRows || 0,
+          terminalRowsPct: percentage(simulation.terminalRows || 0, simulation.rows || 0),
+          entryFilledRows: simulation.entryFilledRows || 0,
+          closedRows: simulation.closedRows || 0,
+          noEntryRows: simulation.noEntryRows || 0,
+          noExitRows: simulation.noExitRows || 0,
+          closedEpisodes: simulation.closedEpisodes || 0,
+          probeSamples: probe.samples || 0,
+          chainValidatedProbeSamples: probe.chainValidatedSamples || 0,
+          cohorts: causalCohorts.filter((row) => row.profileId === profileId),
+        };
+      });
       const rows = Number(b5.rows) || 0;
       const terminalRows = Number(b5.terminal_rows) || 0;
       const headroomSamples = Number(b5.headroom_sample_episodes) || 0;
@@ -495,6 +625,7 @@ function researchReadiness(databasePath, startMs, endMs) {
           realLandingSamples: probeMetrics.real_landing_samples || 0,
           realRankSamples: probeMetrics.real_rank_samples || 0,
         },
+        causalBackrun: { profiles: causalProfiles },
         ingestion: { tradeRowsByMode, dumpEpisodesByMode },
       };
     }
@@ -550,6 +681,20 @@ function researchReadiness(databasePath, startMs, endMs) {
         actual: metrics.broadResearch.terminalSimulationRowsPct,
         required: GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
       },
+      ...metrics.causalBackrun.profiles.flatMap((profile) => ([
+        {
+          id: `${profile.profileId}_EPISODES`,
+          passed: profile.episodes >= GO_NO_GO_THRESHOLDS.minimumCausalEpisodesPerProfile,
+          actual: profile.episodes,
+          required: GO_NO_GO_THRESHOLDS.minimumCausalEpisodesPerProfile,
+        },
+        {
+          id: `${profile.profileId}_TERMINAL_ROWS_PCT`,
+          passed: (profile.terminalRowsPct || 0) >= GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+          actual: profile.terminalRowsPct,
+          required: GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+        },
+      ])),
     ];
     const ready = gates.every((gate) => gate.passed);
     return {
@@ -560,7 +705,8 @@ function researchReadiness(databasePath, startMs, endMs) {
       windowHours,
       thresholds: GO_NO_GO_THRESHOLDS,
       missingColumns,
-      missingCohorts: [],
+      missingCohorts: metrics.causalBackrun.profiles
+        .filter((profile) => profile.episodes === 0).map((profile) => profile.profileId),
       gates,
       ...metrics,
     };

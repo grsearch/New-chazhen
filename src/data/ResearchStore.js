@@ -1454,7 +1454,8 @@ class ResearchStore {
         COUNT(*) total_confirmations
       FROM confirmations c
       JOIN dump_events d ON d.episode_id=c.episode_id
-      WHERE (d.drop_pct IS NULL OR d.drop_pct<=?)
+      WHERE c.profile_id NOT LIKE 'R2-ABS%'
+        AND (d.drop_pct IS NULL OR d.drop_pct<=?)
         AND (? IS NULL OR d.parse_version=?)
         AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
     `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
@@ -2073,6 +2074,14 @@ class ResearchStore {
         noCausalEntryQuote: group.no_causal_entry_quote || 0,
         ...returnStats(rows),
         ...eventConcentrationStats(rows),
+        ...shadowScenarioStats({
+          closedRows: rows,
+          noExit: group.no_exit || 0,
+          noExitLossPcts: this.config.sameSlotNoExitScenarioLossPcts,
+          jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
+          positionSol: group.position_sol,
+          modeledTipSol: 0,
+        }),
       };
     }).sort(compareCohortPerformance);
   }
