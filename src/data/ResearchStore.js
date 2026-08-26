@@ -1405,8 +1405,8 @@ class ResearchStore {
       .run(...models).changes;
   }
 
-  summary() {
-    this.flush();
+  summary({ flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     const shadowModel = this.config.sameSlotQuoteModel;
     const dataQuality = this.db.prepare(`
@@ -2209,8 +2209,8 @@ class ResearchStore {
     }).sort(compareCohortPerformance);
   }
 
-  recentDumps(limit = 100) {
-    this.flush();
+  recentDumps(limit = 100, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     return this.db.prepare(`
       SELECT * FROM dump_events
@@ -2221,8 +2221,8 @@ class ResearchStore {
       Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
-  recentDumpsPage(page = 1, pageSize = 20) {
-    this.flush();
+  recentDumpsPage(page = 1, pageSize = 20, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
     const total = this.db.prepare(`
@@ -2248,14 +2248,14 @@ class ResearchStore {
     };
   }
 
-  recentSimulations(limit = 100) {
-    this.flush();
+  recentSimulations(limit = 100, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     return this.db.prepare(`SELECT * FROM simulations ORDER BY updated_at_ms DESC LIMIT ?`)
       .all(Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
-  recentSameSlotObservations(limit = 100) {
-    this.flush();
+  recentSameSlotObservations(limit = 100, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     return this.db.prepare(`
       WITH ranked AS (
@@ -2275,8 +2275,8 @@ class ResearchStore {
       Math.max(1, Math.min(1_000, Math.trunc(limit))));
   }
 
-  recentWatchedWalletTradesPage(page = 1, pageSize = 20) {
-    this.flush();
+  recentWatchedWalletTradesPage(page = 1, pageSize = 20, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
     const total = this.db.prepare('SELECT COUNT(*) count FROM watched_wallet_trades').get().count;
     const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
@@ -2294,8 +2294,8 @@ class ResearchStore {
     };
   }
 
-  recentSameSlotObservationsPage(page = 1, pageSize = 20) {
-    this.flush();
+  recentSameSlotObservationsPage(page = 1, pageSize = 20, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
     const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
     const total = this.db.prepare(`

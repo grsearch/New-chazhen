@@ -36,6 +36,9 @@ class RuntimeHealthMonitor {
     this.recoverableIssues = [];
     this.fatalIssues = [];
     this.lastRecoveryAtMs = null;
+    this.healthySinceMs = null;
+    this.recoverySuppressed = false;
+    this.lastRecoveryResetAtMs = null;
     this.metrics = {
       checks: 0,
       unhealthyChecks: 0,
@@ -43,6 +46,8 @@ class RuntimeHealthMonitor {
       consecutiveRecoverable: 0,
       consecutiveFatal: 0,
       recoveryTriggers: 0,
+      recoveryAttemptsSinceHealthy: 0,
+      recoverySuppressions: 0,
       providerErrors: 0,
       fatalTriggers: 0,
     };
@@ -90,11 +95,13 @@ class RuntimeHealthMonitor {
     const graceElapsed = now - this.startedAtMs >= this.config.startupGraceMs;
     if (!graceElapsed) {
       this.status = 'STARTING';
+      this.healthySinceMs = null;
       this.metrics.consecutiveUnhealthy = 0;
       this.metrics.consecutiveRecoverable = 0;
       this.metrics.consecutiveFatal = 0;
     } else if (this.issues.length) {
       this.status = 'DEGRADED';
+      this.healthySinceMs = null;
       this.metrics.unhealthyChecks += 1;
       this.metrics.consecutiveUnhealthy += 1;
       this.metrics.consecutiveRecoverable = this.recoverableIssues.length
@@ -108,6 +115,7 @@ class RuntimeHealthMonitor {
       );
     } else {
       this.status = 'HEALTHY';
+      if (this.healthySinceMs == null) this.healthySinceMs = now;
       this.lastHealthyAtMs = now;
       this.metrics.consecutiveUnhealthy = 0;
       this.metrics.consecutiveRecoverable = 0;
@@ -121,15 +129,32 @@ class RuntimeHealthMonitor {
         );
         this.lastHealthyLogAtMs = now;
       }
+      if (this.metrics.recoveryAttemptsSinceHealthy > 0
+        && now - this.healthySinceMs >= this._recoveryResetHealthyMs()) {
+        this.metrics.recoveryAttemptsSinceHealthy = 0;
+        this.recoverySuppressed = false;
+        this.lastRecoveryResetAtMs = now;
+      }
     }
 
+    const recoveryCooldownMs = this._effectiveRecoveryCooldownMs();
     const recoveryCooldownElapsed = this.lastRecoveryAtMs == null
-      || now - this.lastRecoveryAtMs >= this.config.recoveryCooldownMs;
-    if (this.metrics.consecutiveRecoverable >= this.config.recoverableConsecutiveChecks
-      && recoveryCooldownElapsed) {
+      || now - this.lastRecoveryAtMs >= recoveryCooldownMs;
+    const recoveryThresholdReached = this.metrics.consecutiveRecoverable
+      >= this.config.recoverableConsecutiveChecks;
+    if (recoveryThresholdReached && !this.recoverySuppressed && recoveryCooldownElapsed) {
       this.lastRecoveryAtMs = now;
       this.metrics.recoveryTriggers += 1;
+      this.metrics.recoveryAttemptsSinceHealthy += 1;
       this.metrics.consecutiveRecoverable = 0;
+      if (this.metrics.recoveryAttemptsSinceHealthy >= this._recoveryMaxAttempts()) {
+        this.recoverySuppressed = true;
+        this.metrics.recoverySuppressions += 1;
+        this.logger.warn?.(
+          `[Health] automatic join recovery paused after `
+          + `${this.metrics.recoveryAttemptsSinceHealthy} attempts; collection remains running`,
+        );
+      }
       const snapshot = this.health();
       try {
         Promise.resolve(this.onRecoverable(snapshot)).catch((error) => {
@@ -138,6 +163,8 @@ class RuntimeHealthMonitor {
       } catch (error) {
         this.logger.error?.(`[Health] recovery handler failed: ${error.message}`);
       }
+    } else if (recoveryThresholdReached && this.recoverySuppressed) {
+      this.metrics.consecutiveRecoverable = this.config.recoverableConsecutiveChecks;
     }
 
     if (!this.fatalTriggered
@@ -217,6 +244,22 @@ class RuntimeHealthMonitor {
     };
   }
 
+  _recoveryMaxAttempts() {
+    return Math.max(1, finite(this.config.recoveryMaxAttempts, 3));
+  }
+
+  _recoveryResetHealthyMs() {
+    return Math.max(60_000, finite(this.config.recoveryResetHealthyMs, 300_000));
+  }
+
+  _effectiveRecoveryCooldownMs() {
+    const baseMs = Math.max(1_000, finite(this.config.recoveryCooldownMs, 120_000));
+    const multiplier = Math.max(1, finite(this.config.recoveryBackoffMultiplier, 2));
+    const maxMs = Math.max(baseMs, finite(this.config.recoveryMaxCooldownMs, 900_000));
+    const exponent = Math.max(0, this.metrics.recoveryAttemptsSinceHealthy);
+    return Math.min(maxMs, baseMs * (multiplier ** exponent));
+  }
+
   health() {
     return {
       enabled: true,
@@ -228,6 +271,11 @@ class RuntimeHealthMonitor {
       recoverableIssues: [...this.recoverableIssues],
       fatalIssues: [...this.fatalIssues],
       lastRecoveryAtMs: this.lastRecoveryAtMs,
+      lastRecoveryResetAtMs: this.lastRecoveryResetAtMs,
+      healthySinceMs: this.healthySinceMs,
+      recoverySuppressed: this.recoverySuppressed,
+      nextRecoveryAtMs: this.recoverySuppressed || this.lastRecoveryAtMs == null
+        ? null : this.lastRecoveryAtMs + this._effectiveRecoveryCooldownMs(),
       fatalTriggered: this.fatalTriggered,
       checkIntervalMs: this.config.checkIntervalMs,
       maxEventStaleMs: this.config.maxEventStaleMs,
@@ -237,6 +285,11 @@ class RuntimeHealthMonitor {
       fatalConsecutiveChecks: this.config.fatalConsecutiveChecks,
       recoverableConsecutiveChecks: this.config.recoverableConsecutiveChecks,
       recoveryCooldownMs: this.config.recoveryCooldownMs,
+      effectiveRecoveryCooldownMs: this._effectiveRecoveryCooldownMs(),
+      recoveryBackoffMultiplier: finite(this.config.recoveryBackoffMultiplier, 2),
+      recoveryMaxCooldownMs: finite(this.config.recoveryMaxCooldownMs, 900_000),
+      recoveryMaxAttempts: this._recoveryMaxAttempts(),
+      recoveryResetHealthyMs: this._recoveryResetHealthyMs(),
       minimumJoinSamples: this.config.minimumJoinSamples,
       minimumJoinRatePct: this.config.minimumJoinRatePct,
       ...this.metrics,

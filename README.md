@@ -190,11 +190,12 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 - LaserStream 每2秒检查一次数据新鲜度，默认15秒无消息便自动断开并轮换端点重连。
 - 总健康监控每60秒检查 Stream 状态、最近事件时间、SQLite 待写队列、新增写入错误和磁盘余量。
 - 轻量日志与交易状态默认最多等待30秒关联；Join质量按当前连接最近5分钟的成熟样本滚动计算，不把仍在等待的数据放进分母，也不会让旧连接的异常累计污染新连接。
-- 启动宽限默认3分钟。成熟样本至少100条后，Join率连续2次低于90%只会定向重连日志流和状态流；重连冷却默认2分钟，不会退出整个进程。
+- 启动宽限默认3分钟。成熟样本至少100条后，Join率连续2次低于90%只会定向重连日志流和状态流；自动恢复按2/4/8分钟退避，连续3次仍未恢复便暂停重连但继续采集，稳定健康5分钟后才重新启用。
 - 默认在剩余空间低于10GB或10%时进入 `DEGRADED`，防止数据库再次写满系统盘。
 - 正常时每10分钟只向 systemd Journal 写一条简短日志。
 - 只有持续Stream失联、数据库写入异常等不可恢复问题连续5次出现，才退出进程；服务器现有的 `Restart=always` 会自动拉起。
 - `/api/health` 的 `runtime.status` 会显示 `STARTING`、`HEALTHY` 或 `DEGRADED`。
+- Dashboard历史汇总默认缓存30秒，页面每10秒刷新且禁止请求重叠；单个接口超时不会阻止其他表格显示，读取Dashboard也不会强制抢占SQLite待写队列。
 - 轻量模式额外检查日志/交易状态合并率；最近窗口已有至少100条成熟结果且持续低于90%时，会进入`DEGRADED`并由进程定向重连两条Stream。
 
 因此不应再配置 OpenClaw 每10分钟轮询。可选环境变量包括
@@ -204,6 +205,9 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 `SDBR_LOG_STATUS_JOIN_WINDOW_MS`、`SDBR_LOG_STATUS_JOIN_BUCKET_MS`、
 `SDBR_HEALTH_MIN_JOIN_SAMPLES`、`SDBR_HEALTH_MIN_JOIN_RATE_PCT`、
 `SDBR_HEALTH_RECOVERY_CHECKS`、`SDBR_HEALTH_RECOVERY_COOLDOWN_MS`、
+`SDBR_HEALTH_RECOVERY_BACKOFF_MULTIPLIER`、`SDBR_HEALTH_RECOVERY_MAX_COOLDOWN_MS`、
+`SDBR_HEALTH_RECOVERY_MAX_ATTEMPTS`、`SDBR_HEALTH_RECOVERY_RESET_HEALTHY_MS`、
+`SDBR_DASHBOARD_SUMMARY_CACHE_MS`、
 `SDBR_HEALTH_FATAL_CHECKS` 和 `SDBR_HEALTH_EXIT_ON_FATAL`。
 
 ## SQLite 容量控制

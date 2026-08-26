@@ -17,6 +17,10 @@ function configuration(overrides = {}) {
     minimumJoinRatePct: 90,
     recoverableConsecutiveChecks: 2,
     recoveryCooldownMs: 120_000,
+    recoveryBackoffMultiplier: 2,
+    recoveryMaxCooldownMs: 900_000,
+    recoveryMaxAttempts: 3,
+    recoveryResetHealthyMs: 300_000,
     fatalConsecutiveChecks: 3,
     ...overrides,
   };
@@ -201,6 +205,76 @@ test('low join quality requests a targeted recovery and never becomes process-fa
   await Promise.resolve();
   assert.equal(fatals, 0, 'recoverable join loss must not request a systemd restart');
   assert.equal(monitor.health().fatalTriggered, false);
+});
+
+test('repeated join recoveries back off, pause, and reset only after stable health', async () => {
+  let now = 5_800_000;
+  let degraded = true;
+  let recoveries = 0;
+  const monitor = new RuntimeHealthMonitor({
+    config: configuration({
+      recoverableConsecutiveChecks: 2,
+      recoveryCooldownMs: 1_000,
+      recoveryBackoffMultiplier: 2,
+      recoveryMaxCooldownMs: 8_000,
+      recoveryMaxAttempts: 3,
+      recoveryResetHealthyMs: 60_000,
+    }),
+    healthProvider: () => {
+      const state = healthy(now);
+      if (degraded) Object.assign(state.stream, {
+        receivesFullTransactionMetadata: false,
+        logStatusJoinMatureSamples: 1_000,
+        logStatusJoinRatePct: 5,
+        lastLogAtMs: now - 100,
+        lastStatusAtMs: now - 100,
+      });
+      return state;
+    },
+    onRecoverable: () => { recoveries += 1; },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => now,
+  });
+
+  monitor.check();
+  monitor.check();
+  await Promise.resolve();
+  assert.equal(recoveries, 1);
+  assert.equal(monitor.health().effectiveRecoveryCooldownMs, 2_000);
+
+  now += 1_999;
+  monitor.check();
+  monitor.check();
+  assert.equal(recoveries, 1, 'second recovery waits for exponential backoff');
+  now += 1;
+  monitor.check();
+  await Promise.resolve();
+  assert.equal(recoveries, 2);
+
+  now += 4_000;
+  monitor.check();
+  monitor.check();
+  await Promise.resolve();
+  assert.equal(recoveries, 3);
+  assert.equal(monitor.health().recoverySuppressed, true);
+  assert.equal(monitor.health().recoverySuppressions, 1);
+
+  now += 60_000;
+  monitor.check();
+  assert.equal(recoveries, 3, 'suppression prevents an endless reconnect loop');
+
+  degraded = false;
+  monitor.check();
+  now += 60_000;
+  monitor.check();
+  assert.equal(monitor.health().recoverySuppressed, false);
+  assert.equal(monitor.health().recoveryAttemptsSinceHealthy, 0);
+
+  degraded = true;
+  monitor.check();
+  monitor.check();
+  await Promise.resolve();
+  assert.equal(recoveries, 4, 'stable health re-arms controlled recovery');
 });
 
 test('lightweight ingestion detects one-sided stream silence', () => {

@@ -96,6 +96,8 @@ const config = {
   dashboard: {
     host: process.env.SDBR_DASHBOARD_HOST || '127.0.0.1',
     port: integer('SDBR_DASHBOARD_PORT', 8787, { min: 1, max: 65_535 }),
+    summaryCacheMs: integer('SDBR_DASHBOARD_SUMMARY_CACHE_MS', 30_000,
+      { min: 5_000, max: 300_000 }),
   },
   health: {
     checkIntervalMs: integer('SDBR_HEALTH_CHECK_MS', 60_000, { min: 5_000 }),
@@ -110,6 +112,14 @@ const config = {
     recoverableConsecutiveChecks: integer('SDBR_HEALTH_RECOVERY_CHECKS', 2, { min: 1 }),
     recoveryCooldownMs: integer('SDBR_HEALTH_RECOVERY_COOLDOWN_MS', 120_000,
       { min: 30_000, max: 3_600_000 }),
+    recoveryBackoffMultiplier: number('SDBR_HEALTH_RECOVERY_BACKOFF_MULTIPLIER', 2,
+      { min: 1, max: 10 }),
+    recoveryMaxCooldownMs: integer('SDBR_HEALTH_RECOVERY_MAX_COOLDOWN_MS', 900_000,
+      { min: 30_000, max: 3_600_000 }),
+    recoveryMaxAttempts: integer('SDBR_HEALTH_RECOVERY_MAX_ATTEMPTS', 3,
+      { min: 1, max: 10 }),
+    recoveryResetHealthyMs: integer('SDBR_HEALTH_RECOVERY_RESET_HEALTHY_MS', 300_000,
+      { min: 60_000, max: 3_600_000 }),
     fatalConsecutiveChecks: integer('SDBR_HEALTH_FATAL_CHECKS', 5, { min: 2 }),
     exitOnFatal: boolean('SDBR_HEALTH_EXIT_ON_FATAL', true),
   },

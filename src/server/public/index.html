@@ -79,7 +79,8 @@
 <script>
 const PAGE_SIZE=20;
 const state={cohortPage:1,shadowPage:1,sameSlotPage:1,walletPage:1,dumpPage:1,cohorts:[],shadowCohorts:[]};
-let refreshVersion=0;
+let refreshInFlight=false;
+let refreshQueued=false;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
 const pct=v=>v==null||!Number.isFinite(Number(v))?'—':`${fmt(v)}%`;
@@ -227,21 +228,38 @@ function changePage(kind,page){
   state.dumpPage=page;
   refresh();
 }
-async function refresh(){
-  const version=++refreshVersion;
+async function fetchJson(url,timeoutMs=8000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
-    const [summary,dumpPage,sameSlotPage,walletPage,health]=await Promise.all([
-      fetch('/api/summary').then(r=>r.json()),fetch(`/api/dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),
-      fetch(`/api/same-slot?page=${state.sameSlotPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),fetch(`/api/watched-wallets?page=${state.walletPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),fetch('/api/health').then(r=>r.json())
+    const response=await fetch(url,{signal:controller.signal});
+    if(!response.ok)throw new Error(`${url} HTTP ${response.status}`);
+    return await response.json();
+  }finally{clearTimeout(timer)}
+}
+async function refresh(){
+  if(refreshInFlight){refreshQueued=true;return}
+  refreshInFlight=true;
+  try{
+    const [summaryResult,dumpResult,sameSlotResult,walletResult,healthResult]=await Promise.allSettled([
+      fetchJson('/api/summary'),fetchJson(`/api/dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`),
+      fetchJson(`/api/same-slot?page=${state.sameSlotPage}&pageSize=${PAGE_SIZE}`),fetchJson(`/api/watched-wallets?page=${state.walletPage}&pageSize=${PAGE_SIZE}`),fetchJson('/api/health')
     ]);
-    if(version!==refreshVersion)return;
-    document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
+    const failed=[summaryResult,dumpResult,sameSlotResult,walletResult,healthResult]
+      .filter(result=>result.status==='rejected').length;
+    const health=healthResult.status==='fulfilled'?healthResult.value:{};
+    document.querySelector('#status').textContent=healthResult.status==='fulfilled'
+      ?`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}${failed?` · ${failed}项暂不可用`:''}`
+      :`研究模式 · 健康状态暂不可用${failed?` · ${failed}项读取失败`:''}`;
+    if(summaryResult.status==='fulfilled'){
+    const summary=summaryResult.value;
     const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution,w=summary.walletResearch||{},hs=health.stream||{},pr=health.poolResolver||{};
     const cards=[['Helius采集',hs.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],['日志/排序合并率',hs.logStatusJoinRatePct==null?'—':pct(hs.logStatusJoinRatePct)],['待合并消息',hs.pendingLogStatusJoins??0],['新池RPC补全',pr.rpcCalls??0],['独立砸盘事件',d.independent],['平均吸收评分',fmt(d.averageAbsorptionScore,1)],['下一Slot确认事件',d.recoveredEpisodes],['同Slot买入事件',s.eventsWithStrictBuy],['R2-A1研究事件',sh.primaryProfileEpisodes],['R2-A1独立币',sh.primaryProfileMints],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2买单间隔P50',s.rank2InterBuyGapP50Ms==null?'—':`${fmt(s.rank2InterBuyGapP50Ms,0)}ms`],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['观察钱包成交',w.observations||0],['钱包涉及币种',w.mints||0],['钱包同Slot回补',w.sameSlotPostDumpBuys||0],['钱包下一Slot回补',w.nextSlotPostDumpBuys||0],['观测异常已隔离',s.dataQualityQuarantined||0],['真实落地/排名样本','0 / 0']];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
     const notices=[];
     if(hs.receivesFullTransactionMetadata===false)notices.push(`<strong>Helius轻量模式：</strong>只接收PumpSwap日志与交易排序状态，不接收完整交易元数据；已合并 ${hs.joinedLightweightTransactions||0} 笔，应用层负载估算 ${fmt(hs.approximatePayloadMegabytes,1)} MB，池/Mint按需查询 ${pr.rpcCalls||0} 次`);
     if(hs.receivesFullTransactionMetadata===false&&metric(hs.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(hs.logStatusJoinRatePct)}；部署初期可短暂偏低，持续低于95%时不要用该窗口判断实盘</span>`);
+    if(health.runtime?.recoverySuppressed)notices.push('<span class="warning">Join质量自动恢复已在连续3次失败后暂停；采集仍在运行，稳定健康5分钟后会自动重新启用恢复</span>');
     notices.push('<strong>Shadow口径：</strong>Rank#1/#2均为理论入场，使用之后第一笔严格因果公开储备作为退出报价；程序不读取实盘私钥、不发送交易，本地探针只用临时Keypair计时');
     notices.push('<strong>速度口径：</strong>Rank#2余量按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算；仍不包含Leader排队与真实落地时间');
     notices.push('<strong>宽口径：</strong>跌幅5%–40%、Sell/Reserve≥2%、卖后Quote≥20 SOL即进入研究；R2-A1按首买≥max(0.1 SOL,砸盘额1%)标记');
@@ -266,12 +284,17 @@ async function refresh(){
     state.shadowCohorts=summary.sameSlotShadowCohorts||[];
     renderShadowCohorts();
     renderCohorts();
-    renderSameSlot(sameSlotPage);
-    renderWatchedWallets(walletPage);
-    renderDumps(dumpPage);
-  }catch(e){if(version===refreshVersion)document.querySelector('#status').textContent=`读取失败: ${e.message}`}
+    }
+    if(sameSlotResult.status==='fulfilled')renderSameSlot(sameSlotResult.value);
+    if(walletResult.status==='fulfilled')renderWatchedWallets(walletResult.value);
+    if(dumpResult.status==='fulfilled')renderDumps(dumpResult.value);
+  }catch(e){document.querySelector('#status').textContent=`读取失败: ${e.message}`}
+  finally{
+    refreshInFlight=false;
+    if(refreshQueued){refreshQueued=false;setTimeout(refresh,0)}
+  }
 }
-refresh(); setInterval(refresh,5000);
+refresh(); setInterval(refresh,10000);
 </script>
 </body>
 </html>

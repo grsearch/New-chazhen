@@ -36,6 +36,10 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   const script = source.match(/<script>([\s\S]*?)<\/script>/)?.[1];
   assert.ok(script, 'inline dashboard script must exist');
   assert.doesNotThrow(() => new vm.Script(script));
+  assert.match(source, /Promise\.allSettled/);
+  assert.match(source, /if\(refreshInFlight\)\{refreshQueued=true;return\}/);
+  assert.match(source, /AbortController/);
+  assert.doesNotMatch(source, /Promise\.all\(\[/);
   assert.match(source, /const PAGE_SIZE=20/);
   assert.match(source, /pageSize=\$\{PAGE_SIZE\}/);
   assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
@@ -146,4 +150,36 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   assert.equal(wallet.total, 23);
   assert.equal(wallet.items.length, 10);
   assert.equal(wallet.items[0].observation_id, 'watched-12');
+});
+
+test('dashboard caches expensive summaries and reads without forcing a database flush', async (context) => {
+  let summaryCalls = 0;
+  const summaryOptions = [];
+  const store = {
+    summary(options) {
+      summaryCalls += 1;
+      summaryOptions.push(options);
+      return { sequence: summaryCalls };
+    },
+  };
+  const dashboard = new DashboardServer({
+    config: { host: '127.0.0.1', port: 0, summaryCacheMs: 60_000 },
+    store,
+    health: () => ({ state: 'TEST' }),
+  });
+  context.after(async () => dashboard.stop());
+  await dashboard.start();
+  const port = dashboard.server.address().port;
+
+  const first = await fetch(`http://127.0.0.1:${port}/api/summary`).then((r) => r.json());
+  const second = await fetch(`http://127.0.0.1:${port}/api/summary`).then((r) => r.json());
+  assert.deepEqual(first, { sequence: 1 });
+  assert.deepEqual(second, { sequence: 1 });
+  assert.equal(summaryCalls, 1);
+  assert.deepEqual(summaryOptions, [{ flushPending: false }]);
+
+  const health = await fetch(`http://127.0.0.1:${port}/api/health`).then((r) => r.json());
+  assert.equal(health.dashboard.summaryRequests, 2);
+  assert.equal(health.dashboard.summaryComputations, 1);
+  assert.equal(health.dashboard.summaryCacheHits, 1);
 });
