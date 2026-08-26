@@ -32,9 +32,10 @@ function pct(part, whole) {
 }
 
 class SameSlotShadowSimulator {
-  constructor({ config, store = null, now = () => Date.now() }) {
+  constructor({ config, store = null, executionProbe = null, now = () => Date.now() }) {
     this.config = config;
     this.store = store;
+    this.executionProbe = executionProbe;
     this.now = now;
     this.txFeeSol = transactionFeeSol(config);
     this.responseBudgetMs = [
@@ -101,7 +102,10 @@ class SameSlotShadowSimulator {
       const dumpSlot = finite(dump.slot);
       if (tradeSlot == null || dumpSlot == null || tradeSlot < dumpSlot) continue;
       if (tradeSlot === dumpSlot) {
-        if (causallyAfter(trade, dump.signalTrade)) state.trades.push(trade);
+        if (causallyAfter(trade, dump.signalTrade)) {
+          state.trades.push(trade);
+          this._measureCandidateTrigger(state, trade);
+        }
         continue;
       }
       state.trades.push(trade);
@@ -113,6 +117,28 @@ class SameSlotShadowSimulator {
     }
     changed.push(...this._processExitTrade(trade, null, finalizedNow));
     return changed;
+  }
+
+  _measureCandidateTrigger(state, trade) {
+    const candidate = this.config.candidate || { enabled: false };
+    const dump = state?.dump;
+    if (!candidate.enabled || !dump || trade?.side !== 'BUY'
+      || finite(trade.solAmount, 0) < finite(candidate.minTriggerBuySol, Infinity)
+      || finite(dump.postQuoteSol, 0) < finite(candidate.minPostQuoteSol, Infinity)
+      || finite(dump.dropPct, Infinity) > finite(candidate.maxDropPct, -Infinity)
+      || this.store?.isCandidateMintExcluded?.(candidate.profileId, dump.mint)) return;
+    const triggerQuality = assessTradeDataQuality(trade, this.config, dump.signalTrade);
+    if (state.dataQuality.status !== 'TRUSTED' || triggerQuality.status !== 'TRUSTED') return;
+    const triggerAtMs = finite(trade.receivedAtMs ?? trade.timestampMs, this.now());
+    this.executionProbe?.measure?.({
+      episodeId: dump.episodeId,
+      candidatePrimary: true,
+      candidateProfileId: candidate.profileId,
+      candidateCohortStage: candidate.cohortStage,
+      entryAtMs: triggerAtMs,
+      triggerSignature: trade.signature || null,
+      infrastructureExecutable: false,
+    });
   }
 
   _processExitTrade(trade, onlyEpisodes = null, skipEpisodes = new Set()) {
@@ -312,6 +338,14 @@ class SameSlotShadowSimulator {
   }) {
     if (!this.config.targetRanks.includes(targetRank)) return [];
     const created = [];
+    const candidate = this.config.candidate || { enabled: false };
+    const candidateEligible = Boolean(candidate.enabled && targetRank === 2
+      && entryProfileId === 'R2-B5' && quality.status === 'TRUSTED'
+      && finite(triggerTrade?.solAmount, 0) >= finite(candidate.minTriggerBuySol, Infinity)
+      && finite(dump.postQuoteSol, 0) >= finite(candidate.minPostQuoteSol, Infinity)
+      && finite(dump.dropPct, Infinity) <= finite(candidate.maxDropPct, -Infinity));
+    const candidateNovelMint = candidateEligible
+      && !this.store?.isCandidateMintExcluded?.(candidate.profileId, dump.mint);
     for (const positionSol of this.config.positionSizesSol) {
       const capacity = quoteImmediateRoundTrip(entryReferenceTrade, positionSol, {
         buySlippageBps: this.config.buySlippageBps,
@@ -351,6 +385,19 @@ class SameSlotShadowSimulator {
           targetRank,
           entryProfileId,
           cohortStage: cohortStage || 'CONTROL',
+          candidateProfileId: candidateEligible ? candidate.profileId : null,
+          candidateCohortStage: candidateEligible ? candidate.cohortStage : null,
+          candidatePrimary: candidateEligible
+            && positionSol === candidate.primaryPositionSol
+            && exitHorizonMs === candidate.primaryExitHorizonMs,
+          candidateNovelMint: candidateEligible ? candidateNovelMint : null,
+          candidateCriteria: candidateEligible ? {
+            minTriggerBuySol: candidate.minTriggerBuySol,
+            minPostQuoteSol: candidate.minPostQuoteSol,
+            maxDropPct: candidate.maxDropPct,
+            primaryPositionSol: candidate.primaryPositionSol,
+            primaryExitHorizonMs: candidate.primaryExitHorizonMs,
+          } : null,
           positionSol,
           exitHorizonMs,
           quoteModel: this.config.quoteModel,
@@ -432,6 +479,9 @@ class SameSlotShadowSimulator {
           if (entryProfileId === 'R2-B5') this.metrics.rank2B5Entries += 1;
         }
         this.store?.insertSameSlotShadow?.(simulation);
+        if (simulation.candidatePrimary && simulation.candidateNovelMint && !rejectionReason) {
+          this.executionProbe?.finalize?.(simulation);
+        }
         created.push(simulation);
       }
     }
@@ -526,6 +576,8 @@ class SameSlotShadowSimulator {
       quoteModel: this.config.quoteModel,
       responseBudgetMs: this.responseBudgetMs,
       sendsTransactions: false,
+      candidateProfileId: this.config.candidate?.profileId || null,
+      executionProbe: this.executionProbe?.health?.() || { enabled: false },
       ...this.metrics,
     };
   }

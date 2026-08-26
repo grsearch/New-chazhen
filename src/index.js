@@ -3,6 +3,7 @@
 const { config, validateConfig } = require('./config');
 const { PumpEventParser } = require('./core/PumpEventParser');
 const { PumpFlowStream } = require('./core/PumpFlowStream');
+const { PumpPoolResolver } = require('./core/PumpPoolResolver');
 const { SlotAssembler } = require('./core/SlotAssembler');
 const { PostDumpRecoveryEngine } = require('./core/PostDumpRecoveryEngine');
 const { ResearchStore } = require('./data/ResearchStore');
@@ -20,6 +21,7 @@ async function main() {
     sameSlotMaxTradeSol: config.sameSlotShadow.maxTradeSol,
     sameSlotNoExitScenarioLossPcts: config.sameSlotShadow.noExitScenarioLossPcts,
     sameSlotJitoTipScenariosSol: config.sameSlotShadow.jitoTipScenariosSol,
+    sameSlotCandidate: config.sameSlotShadow.candidate,
     maxReportedRecoveryPct: config.recovery.maxReportedRecoveryPct,
   });
   const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
@@ -43,6 +45,8 @@ async function main() {
   const slots = new SlotAssembler(config.slotAssembler);
   const engine = new PostDumpRecoveryEngine({ config, store });
   const stream = new PumpFlowStream({ config });
+  const poolResolver = config.stream.mode === 'logs-status'
+    ? new PumpPoolResolver({ config }) : null;
   let streamState = { state: 'STARTING' };
   let runtimeHealth = null;
   slots.on('slotFinalized', (summary) => store.recordSlotSummary(summary));
@@ -50,14 +54,28 @@ async function main() {
   stream.on('streamError', ({ error, phase, retryInMs }) => {
     console.error(`[LaserStream:${phase}] ${error.message}; retry in ${retryInMs}ms`);
   });
+  const observeParsed = (events) => {
+    for (const parsed of events) engine.observe(slots.ingest(parsed));
+  };
   stream.on('transaction', (transaction, context) => {
     try {
-      for (const parsed of parser.parseTransaction(transaction, context.receivedAtMs)) {
-        engine.observe(slots.ingest(parsed));
-      }
+      observeParsed(parser.parseTransaction(transaction, context.receivedAtMs));
     } catch (error) {
       engine.metrics.errors += 1;
       console.error('[ingestion]', error.message);
+    }
+  });
+  stream.on('logTransaction', async (transaction, context) => {
+    try {
+      const events = await parser.parseLogTransaction(
+        transaction,
+        context.receivedAtMs,
+        (pool) => poolResolver.resolve(pool),
+      );
+      observeParsed(events);
+    } catch (error) {
+      engine.metrics.errors += 1;
+      console.error('[lightweight-ingestion]', error.message);
     }
   });
 
@@ -71,6 +89,7 @@ async function main() {
       retryInMs: streamState.retryInMs || null,
     },
     slotAssembler: slots.health(),
+    poolResolver: poolResolver?.health() || { mode: 'FULL_TRANSACTION_TOKEN_BALANCES' },
     engine: engine.health(),
     store: store.health(),
   });
@@ -104,8 +123,10 @@ async function main() {
   await dashboard.start();
   console.log(`Dashboard: http://${config.dashboard.host}:${config.dashboard.port}`);
   console.log('Mode: research only; transaction sending is not implemented.');
-  console.log(`LaserStream subscription: ${config.stream.includePumpLifecycle
-    ? 'PumpSwap + Pump lifecycle' : 'PumpSwap only (Helius-saving mode)'}.`);
+  console.log(`LaserStream subscription: ${config.stream.mode === 'logs-status'
+    ? 'PumpSwap logs + lightweight transaction status; full metadata disabled'
+    : (config.stream.includePumpLifecycle
+      ? 'full PumpSwap + Pump lifecycle' : 'full PumpSwap transactions')}.`);
   await stream.start();
   runtimeHealth = new RuntimeHealthMonitor({
     config: config.health,

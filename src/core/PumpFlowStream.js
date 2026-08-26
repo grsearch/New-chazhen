@@ -1,7 +1,11 @@
 'use strict';
 
 const EventEmitter = require('events');
+const bs58Module = require('bs58');
+const { Connection, PublicKey } = require('@solana/web3.js');
 const { extractSignature } = require('./PumpEventParser');
+
+const bs58 = bs58Module.default || bs58Module;
 
 let runtime = null;
 
@@ -46,23 +50,66 @@ function buildTransactionFilters(config, filterType) {
   return transactions;
 }
 
+function buildTransactionStatusFilters(config, filterType) {
+  return {
+    pumpSwapStatus: proto(filterType, {
+      vote: false,
+      failed: false,
+      accountInclude: [config.pump.ammProgramId],
+      accountExclude: [],
+      accountRequired: [],
+    }),
+  };
+}
+
+function signatureText(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return bs58.encode(Buffer.from(value));
+  }
+  return null;
+}
+
+function nonnegativeInteger(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : null;
+}
+
 class PumpFlowStream extends EventEmitter {
-  constructor({ config, connectionFactory = null }) {
+  constructor({ config, connectionFactory = null, logsConnectionFactory = null }) {
     super();
     this.config = config;
     this.connectionFactory = connectionFactory;
+    this.logsConnectionFactory = logsConnectionFactory;
     this.running = false;
     this.client = null;
     this.stream = null;
+    this.logsConnection = null;
+    this.logsSubscriptionId = null;
     this.endpointIndex = -1;
     this.retry = 0;
     this.reconnectTimer = null;
     this.watchdog = null;
     this.lastMessageAtMs = null;
+    this.lastLogAtMs = null;
+    this.lastStatusAtMs = null;
     this.connectedAtMs = null;
     this.seen = new Map();
+    this.pendingLogs = new Map();
+    this.pendingStatuses = new Map();
     this.metrics = {
       received: 0,
+      fullTransactions: 0,
+      logNotifications: 0,
+      transactionStatuses: 0,
+      joinedLightweightTransactions: 0,
+      unmatchedLogsExpired: 0,
+      unmatchedStatusesExpired: 0,
+      slotMismatches: 0,
+      approximateLogBytes: 0,
+      approximateStatusBytes: 0,
       duplicates: 0,
       reconnects: 0,
       errors: 0,
@@ -103,6 +150,9 @@ class PumpFlowStream extends EventEmitter {
       this.stream.on('close', () => this._unavailable(new Error('stream closed'), 'STREAM_CLOSE'));
       this.connectedAtMs = Date.now();
       this.lastMessageAtMs = null;
+      this.lastLogAtMs = null;
+      this.lastStatusAtMs = null;
+      if (this._isLightweight()) await this._startLogStream();
       this.retry = 0;
       this.emit('state', this.health({ state: 'CONNECTED', reason }));
     } catch (error) {
@@ -120,12 +170,16 @@ class PumpFlowStream extends EventEmitter {
     });
     if (typeof client.connect === 'function') await client.connect();
     const stream = await client.subscribe();
+    const lightweight = this._isLightweight();
     const request = proto(types.SubscribeRequest, {
-      transactions: buildTransactionFilters(
+      transactions: lightweight ? {} : buildTransactionFilters(
         this.config, types.SubscribeRequestFilterTransactions,
       ),
       accounts: {}, slots: {}, blocks: {}, blocksMeta: {}, entry: {},
-      transactionsStatus: {}, accountsDataSlice: [],
+      transactionsStatus: lightweight ? buildTransactionStatusFilters(
+        this.config, types.SubscribeRequestFilterTransactions,
+      ) : {},
+      accountsDataSlice: [],
       commitment: types.CommitmentLevel.PROCESSED,
     });
     await new Promise((resolve, reject) => {
@@ -135,16 +189,128 @@ class PumpFlowStream extends EventEmitter {
   }
 
   _onMessage(message) {
-    if (!message?.transaction) return;
     const receivedAtMs = Date.now();
     this.lastMessageAtMs = receivedAtMs;
+    if (this._isLightweight()) {
+      const status = message?.transactionStatus || message?.transaction_status;
+      if (status) this._onTransactionStatus(status, receivedAtMs);
+      return;
+    }
+    if (!message?.transaction) return;
     const signature = extractSignature(message.transaction);
     if (signature && !this._first(signature, receivedAtMs)) {
       this.metrics.duplicates += 1;
       return;
     }
     this.metrics.received += 1;
+    this.metrics.fullTransactions += 1;
     this.emit('transaction', message.transaction, { receivedAtMs, endpointIndex: this.endpointIndex });
+  }
+
+  _isLightweight() {
+    return this.config.stream.mode === 'logs-status';
+  }
+
+  async _startLogStream() {
+    this.logsConnection = this.logsConnectionFactory
+      ? await this.logsConnectionFactory({
+        rpcUrl: this.config.stream.rpcUrl,
+        programId: this.config.pump.ammProgramId,
+      })
+      : new Connection(this.config.stream.rpcUrl, {
+        commitment: 'processed',
+        disableRetryOnRateLimit: false,
+      });
+    this.logsSubscriptionId = await this.logsConnection.onLogs(
+      new PublicKey(this.config.pump.ammProgramId),
+      (value, context) => this._onLogNotification(value, context),
+      'processed',
+    );
+  }
+
+  _onLogNotification(value, context = {}) {
+    const receivedAtMs = Date.now();
+    this.lastMessageAtMs = receivedAtMs;
+    this.lastLogAtMs = receivedAtMs;
+    if (!value || value.err || !value.signature || !Array.isArray(value.logs)) return;
+    this.metrics.logNotifications += 1;
+    try {
+      this.metrics.approximateLogBytes += Buffer.byteLength(JSON.stringify(value));
+    } catch (_) {}
+    this.pendingLogs.set(value.signature, {
+      signature: value.signature,
+      slot: nonnegativeInteger(context.slot),
+      logs: value.logs,
+      err: value.err,
+      receivedAtMs,
+      expiresAtMs: receivedAtMs + this.config.stream.joinTtlMs,
+    });
+    this._joinLightweight(value.signature, receivedAtMs);
+  }
+
+  _onTransactionStatus(status, receivedAtMs) {
+    const signature = signatureText(status.signature);
+    if (!signature || status.err) return;
+    this.lastStatusAtMs = receivedAtMs;
+    this.metrics.transactionStatuses += 1;
+    this.metrics.approximateStatusBytes += 96;
+    this.pendingStatuses.set(signature, {
+      signature,
+      slot: nonnegativeInteger(status.slot),
+      transactionIndex: nonnegativeInteger(status.index),
+      receivedAtMs,
+      expiresAtMs: receivedAtMs + this.config.stream.joinTtlMs,
+    });
+    this._joinLightweight(signature, receivedAtMs);
+  }
+
+  _joinLightweight(signature, now) {
+    const logs = this.pendingLogs.get(signature);
+    const status = this.pendingStatuses.get(signature);
+    if (!logs || !status) {
+      this._expirePairs(now);
+      return;
+    }
+    this.pendingLogs.delete(signature);
+    this.pendingStatuses.delete(signature);
+    if (logs.slot != null && status.slot != null && logs.slot !== status.slot) {
+      this.metrics.slotMismatches += 1;
+      this._expirePairs(now);
+      return;
+    }
+    if (!this._first(signature, now)) {
+      this.metrics.duplicates += 1;
+      return;
+    }
+    this.metrics.received += 1;
+    this.metrics.joinedLightweightTransactions += 1;
+    this.emit('logTransaction', {
+      signature,
+      slot: status.slot ?? logs.slot,
+      transactionIndex: status.transactionIndex,
+      logs: logs.logs,
+      err: null,
+    }, {
+      receivedAtMs: logs.receivedAtMs,
+      statusReceivedAtMs: status.receivedAtMs,
+      joinedAtMs: now,
+      endpointIndex: this.endpointIndex,
+    });
+    this._expirePairs(now);
+  }
+
+  _expirePairs(now) {
+    const limit = Math.max(this.config.stream.dedupMax, 1_000);
+    for (const [signature, row] of this.pendingLogs) {
+      if (row.expiresAtMs > now && this.pendingLogs.size <= limit) continue;
+      this.pendingLogs.delete(signature);
+      this.metrics.unmatchedLogsExpired += 1;
+    }
+    for (const [signature, row] of this.pendingStatuses) {
+      if (row.expiresAtMs > now && this.pendingStatuses.size <= limit) continue;
+      this.pendingStatuses.delete(signature);
+      this.metrics.unmatchedStatusesExpired += 1;
+    }
   }
 
   _first(signature, now) {
@@ -181,9 +347,23 @@ class PumpFlowStream extends EventEmitter {
 
   _startWatchdog() {
     this.watchdog = setInterval(() => {
+      if (!this.running || !this.connectedAtMs || this.reconnectTimer) return;
+      const now = Date.now();
+      if (this._isLightweight()) {
+        const logAnchor = this.lastLogAtMs || this.connectedAtMs;
+        const statusAnchor = this.lastStatusAtMs || this.connectedAtMs;
+        if (now - logAnchor >= this.config.stream.staleTimeoutMs) {
+          this._unavailable(new Error('PumpSwap log stream became stale'), 'LOG_STREAM_STALE');
+        } else if (now - statusAnchor >= this.config.stream.staleTimeoutMs) {
+          this._unavailable(
+            new Error('PumpSwap transaction status stream became stale'),
+            'STATUS_STREAM_STALE',
+          );
+        }
+        return;
+      }
       const last = this.lastMessageAtMs || this.connectedAtMs;
-      if (!this.running || !last || this.reconnectTimer) return;
-      if (Date.now() - last >= this.config.stream.staleTimeoutMs) {
+      if (now - last >= this.config.stream.staleTimeoutMs) {
         this._unavailable(new Error('LaserStream became stale'), 'STALE');
       }
     }, this.config.stream.staleCheckMs);
@@ -191,6 +371,13 @@ class PumpFlowStream extends EventEmitter {
   }
 
   async _close() {
+    if (this.logsConnection && this.logsSubscriptionId != null) {
+      try { await this.logsConnection.removeOnLogsListener(this.logsSubscriptionId); } catch (_) {}
+    }
+    this.logsSubscriptionId = null;
+    this.logsConnection = null;
+    this.pendingLogs.clear();
+    this.pendingStatuses.clear();
     if (this.stream) {
       try { this.stream.removeAllListeners(); } catch (_) {}
       try { this.stream.destroy(); } catch (_) {}
@@ -204,17 +391,35 @@ class PumpFlowStream extends EventEmitter {
 
   health(extra = {}) {
     const includesPumpLifecycle = Boolean(this.config.stream.includePumpLifecycle);
+    const lightweight = this._isLightweight();
+    const joinDenominator = Math.min(
+      this.metrics.logNotifications,
+      this.metrics.transactionStatuses,
+    );
     return {
-      mode: includesPumpLifecycle
+      mode: lightweight
+        ? 'LIGHTWEIGHT_PUMPSWAP_LOGS_PLUS_STATUS'
+        : includesPumpLifecycle
         ? 'ACTIVE_PASSIVE_PUMPSWAP_PLUS_PUMP_LIFECYCLE'
         : 'ACTIVE_PASSIVE_PUMPSWAP_ONLY',
-      subscriptionFilters: includesPumpLifecycle
+      subscriptionFilters: lightweight
+        ? ['pumpSwapLogs', 'pumpSwapStatus']
+        : includesPumpLifecycle
         ? ['pumpSwap', 'pumpLifecycle'] : ['pumpSwap'],
-      exactMigrationTimestamps: includesPumpLifecycle,
+      exactMigrationTimestamps: !lightweight && includesPumpLifecycle,
+      receivesFullTransactionMetadata: !lightweight,
+      pendingLogStatusJoins: this.pendingLogs.size + this.pendingStatuses.size,
+      logStatusJoinRatePct: lightweight && joinDenominator > 0
+        ? this.metrics.joinedLightweightTransactions / joinDenominator * 100 : null,
+      approximateLogMegabytes: this.metrics.approximateLogBytes / 1_000_000,
+      approximatePayloadMegabytes:
+        (this.metrics.approximateLogBytes + this.metrics.approximateStatusBytes) / 1_000_000,
       endpointIndex: this.endpointIndex,
       endpoint: this.endpointIndex >= 0 ? this.config.stream.endpoints[this.endpointIndex] : null,
       connectedAtMs: this.connectedAtMs,
       lastMessageAtMs: this.lastMessageAtMs,
+      lastLogAtMs: this.lastLogAtMs,
+      lastStatusAtMs: this.lastStatusAtMs,
       dedupSize: this.seen.size,
       ...this.metrics,
       ...extra,
@@ -222,4 +427,8 @@ class PumpFlowStream extends EventEmitter {
   }
 }
 
-module.exports = { PumpFlowStream, buildTransactionFilters };
+module.exports = {
+  PumpFlowStream,
+  buildTransactionFilters,
+  buildTransactionStatusFilters,
+};

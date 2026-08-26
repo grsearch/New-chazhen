@@ -124,3 +124,41 @@ test('low disk space is detected locally before the filesystem is full', () => {
   assert.equal(result.status, 'DEGRADED');
   assert.match(result.issues[0], /^DISK_LOW_5\.00GB_8\.00PCT$/);
 });
+
+test('lightweight ingestion detects sustained log and status join loss', () => {
+  const now = 5_000_000;
+  const state = healthy(now);
+  Object.assign(state.stream, {
+    receivesFullTransactionMetadata: false,
+    logNotifications: 1_000,
+    transactionStatuses: 1_000,
+    joinedLightweightTransactions: 500,
+    logStatusJoinRatePct: 50,
+  });
+  const monitor = new RuntimeHealthMonitor({
+    config: configuration(),
+    healthProvider: () => state,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => now,
+  });
+  const result = monitor.check();
+  assert.equal(result.status, 'DEGRADED');
+  assert.deepEqual(result.issues, ['LIGHTWEIGHT_JOIN_RATE_LOW_50.00PCT']);
+});
+
+test('lightweight ingestion detects one-sided stream silence', () => {
+  const now = 6_000_000;
+  const state = healthy(now);
+  Object.assign(state.stream, {
+    receivesFullTransactionMetadata: false,
+    lastLogAtMs: now - 200_000,
+    lastStatusAtMs: now - 100,
+  });
+  const monitor = new RuntimeHealthMonitor({
+    config: configuration(),
+    healthProvider: () => state,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    now: () => now,
+  });
+  assert.deepEqual(monitor.check().issues, ['LOG_STREAM_STALE_200000MS']);
+});

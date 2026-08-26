@@ -46,6 +46,8 @@ function numberList(name, fallback, bounds = {}) {
 
 const positionSizesSol = [1, 2, 5];
 const maxDumpDropPct = number('SDBR_MAX_DUMP_DROP_PCT', 40, { min: 1, max: 99 });
+const streamToken = process.env.SDBR_GRPC_TOKEN || '';
+const streamMode = (process.env.SDBR_STREAM_MODE || 'logs-status').trim().toLowerCase();
 
 const config = {
   pump: {
@@ -57,7 +59,10 @@ const config = {
   },
   stream: {
     endpoints: list('SDBR_GRPC_ENDPOINTS'),
-    token: process.env.SDBR_GRPC_TOKEN || '',
+    token: streamToken,
+    mode: streamMode,
+    rpcUrl: process.env.SDBR_RPC_URL
+      || `https://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(streamToken)}`,
     // Pump Program carries the very high-volume pre-migration bonding-curve flow.
     // Same-Slot research only needs PumpSwap; exact migration timestamps are optional.
     includePumpLifecycle: boolean('SDBR_INCLUDE_PUMP_LIFECYCLE', false),
@@ -67,6 +72,10 @@ const config = {
     staleCheckMs: integer('SDBR_STALE_CHECK_MS', 2_000, { min: 500 }),
     dedupTtlMs: integer('SDBR_DEDUP_TTL_MS', 300_000, { min: 10_000 }),
     dedupMax: integer('SDBR_DEDUP_MAX', 100_000, { min: 1_000 }),
+    joinTtlMs: integer('SDBR_LOG_STATUS_JOIN_TTL_MS', 10_000, { min: 1_000, max: 60_000 }),
+    poolResolveRetryMs: integer('SDBR_POOL_RESOLVE_RETRY_MS', 30_000,
+      { min: 1_000, max: 600_000 }),
+    poolCacheMax: integer('SDBR_POOL_CACHE_MAX', 200_000, { min: 1_000 }),
   },
   storage: {
     dbPath: path.resolve(process.env.SDBR_DB_PATH || './data/sdbr-research.db'),
@@ -200,6 +209,26 @@ const config = {
     buildBudgetMs: number('SDBR_SPEED_BUILD_BUDGET_MS', 5, { min: 0 }),
     signBudgetMs: number('SDBR_SPEED_SIGN_BUDGET_MS', 1, { min: 0 }),
     sendBudgetMs: number('SDBR_SPEED_SEND_BUDGET_MS', 15, { min: 0 }),
+    candidate: Object.freeze({
+      enabled: true,
+      profileId: 'R2-B10-Q500-V1',
+      cohortStage: 'HOLDOUT_B10_Q500_V1',
+      minTriggerBuySol: 10,
+      minPostQuoteSol: 500,
+      maxDropPct: 40,
+      primaryPositionSol: 1,
+      primaryExitHorizonMs: 250,
+      minimumEpisodes: 100,
+      minimumMints: 50,
+      minimumFullLossProfitFactor: 1.3,
+      noExitLossPct: -100,
+      jitoTipSol: 0.01,
+    }),
+  },
+  executionProbe: {
+    enabled: true,
+    sendEnabled: false,
+    model: 'SOLANA_V0_EPHEMERAL_NOOP_V1',
   },
   execution: {
     positionSizesSol,
@@ -241,6 +270,13 @@ const config = {
 function validateConfig({ requireStream = true } = {}) {
   const errors = [];
   if (requireStream && config.stream.endpoints.length === 0) errors.push('SDBR_GRPC_ENDPOINTS is required');
+  if (requireStream && !config.stream.token) errors.push('SDBR_GRPC_TOKEN is required');
+  if (!['logs-status', 'full-transactions'].includes(config.stream.mode)) {
+    errors.push('SDBR_STREAM_MODE must be logs-status or full-transactions');
+  }
+  if (config.stream.mode === 'logs-status' && config.stream.includePumpLifecycle) {
+    errors.push('SDBR_INCLUDE_PUMP_LIFECYCLE must be false in logs-status mode');
+  }
   if (!config.execution.positionSizesSol.length) errors.push('at least one position size is required');
   if (!config.sameSlotShadow.positionSizesSol.length) errors.push('at least one Same-Slot position size is required');
   if (config.sameSlotShadow.strongRank2TriggerBuySol

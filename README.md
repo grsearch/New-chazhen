@@ -8,23 +8,24 @@
 首要目标是研究“大砸单后能否成为同 Slot 第1或第2笔买入，并快速退出”。后续 Slot 的
 Post-Dump Recovery 保留为对照组，用来判断当极速基础设施没有落地时，公开信息入场是否仍有收益。
 
-> 当前代码不会读取私钥，不会签名，也没有发送交易的实现。
+> 当前代码不会读取实盘私钥，也不会发送交易。新增的测速层只使用进程内临时密钥，真实执行
+> 本地构建、签名和序列化计时；交易不会离开本机，因此不会产生链上落地或排名数据。
 
 ## 策略流程
 
-1. **Stream Ingestion**：默认只订阅全部 PumpSwap Program 交易，解析官方事件字段；不再接收海量且与核心策略无关的迁移前 Pump Program 买卖。可选的 Pump 生命周期订阅仅用于精确迁移时间。
+1. **Stream Ingestion**：默认使用轻量双流：WebSocket只接收PumpSwap事件日志，LaserStream只接收包含`slot / signature / transactionIndex`的交易状态，不再接收完整交易元数据；首次遇到新池时按需读取Pool和Mint账户以补齐Mint与精度。`full-transactions`保留为紧急回退模式。
 2. **Slot Assembler**：记录 `slot / transactionIndex / instructionIndex / eventIndex / signature`。
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
 4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
-5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；Rank #2分为首买至少5 SOL的`R2-B5`验证组、至少2 SOL的`R2-B2`对照组和`R2-BASE`。使用1/2/5 SOL和100/250/500ms快速退出，主退出无报价时再研究5秒、10秒应急退出；所有结果强制标记为不可执行理论成交。
+5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；原`R2-B5`、`R2-B2`和`R2-BASE`继续作为对照。新增冻结候选`R2-B10-Q500-V1`：Rank #2首买至少10 SOL、卖后Quote至少500 SOL、跌幅不超过40%。主研究组合固定为1 SOL / 250ms，2/5 SOL和100/500ms只作敏感性记录；所有结果强制标记为不可执行理论成交。
 6. **Toxic Flow Filter**：在信号时点用 Creator、已知毒性钱包、机械上涨、买家集中度等因果信息过滤。
 7. **Recovery Confirmer**：下一 Slot/后续 Slot 必须同时满足价格恢复、多钱包、真实金额、资金流和无二次砸盘。
 8. **Recovery Execution Simulator**：作为对照组，分别模拟确认后 100/200/400/800ms 与确认后的下一 Slot 入场，仓位为 1/2/5 SOL。等待入场期间一旦出现二次砸盘，全部待入场组合立即取消；每个仓位还必须通过即时往返成本和双边流动性占用检查。
 
 程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
 9. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
-10. **Minimal Dashboard**：优先展示`R2-B5`验证样本、Same-Slot链上排名、23ms速度余量和应急退出；后续 Slot 恢复仅作为对照组。页面同时显示 Fill Rate、NO_EXIT与Jito合并情景收益、PF、独立事件、实际覆盖时长和异常隔离数量。
+10. **Minimal Dashboard**：优先展示`R2-B10-Q500-V1`冻结候选、主组合1 SOL / 250ms、历史币隔离进度、本地构建/签名测速及全损PF；`R2-B5`和后续 Slot 恢复只作对照。真实发送被硬关闭，因此真实落地与排名样本始终明确显示为0。
 
 ## 两条研究线
 
@@ -39,6 +40,8 @@ Same-Slot Shadow V2 建立四种可区分的反事实研究路径：
 - `R2-BASE / Rank #2`：观察到严格排序的第1笔真实买单后，以该买单执行后的公开储备为理论入场状态。
 - `R2-B2 / Rank #2`：第一笔严格同Slot买单至少2 SOL，继续作为宽松对照组。
 - `R2-B5 / Rank #2`：第一笔严格同Slot买单至少5 SOL，是从2026-08-24数据中发现后冻结的验证组。旧记录重标为`DISCOVERY_RECLASSIFIED_20260824`，部署后的新记录进入`HOLDOUT_B5_V1`，两者不混合排名。阈值可用`SDBR_RANK2_STRONG_TRIGGER_BUY_SOL`配置，但验证期间不应继续按当天结果调参。
+- `R2-B10-Q500-V1 / Rank #2`：新的冻结验证候选，要求第一笔严格同Slot买单至少10 SOL、砸盘后Quote至少500 SOL且跌幅不超过40%。启用时会一次性把数据库中已经出现过的全部历史Mint写入排除表；后续统计只接受部署后出现的新Mint，避免用发现样本验证自己。
+- 候选主组合固定为1 SOL / 250ms。2/5 SOL及100/500ms继续保存，只能用于容量和敏感性对照，不能取代主组合做开实盘判断。
 - 仓位固定为1/2/5 SOL，主退出目标为入场后100/250/500ms。
 - 主退出使用目标时点之后第一笔严格因果公开成交的储备报价；2秒内没有报价时依次切换到5秒、10秒应急目标，每个目标各有2秒报价宽限。全部失败后才记录`NO_EXIT`。
 - 每次入场都先检查即时买卖往返成本和双边流动性占用，并扣除AMM费用、滑点、基础费、Priority Fee与Jito Tip假设。
@@ -54,7 +57,15 @@ Same-Slot Shadow V2 建立四种可区分的反事实研究路径：
 
 要把该方向变成可执行策略，需要单独的极速执行层：低延迟区块数据、预构建交易、Leader/Block Engine
 直发、动态 Priority Fee/Jito Tip、账户预热和落地排名回执。Jito Bundle只能保证自己提交的Bundle内部顺序，
-不能把已经执行的任意公开砸盘交易重新装进自己的Bundle。当前仓库尚未读取私钥或发送交易。
+不能把已经执行的任意公开砸盘交易重新装进自己的Bundle。当前仓库的极速测速层仅使用临时Keypair构建、
+签名和序列化一笔零金额本地交易，硬编码`send_enabled=0`；`send_status=DISABLED`、
+`landing_status=NOT_SENT`、`rank_status=NOT_MEASURABLE_WITHOUT_SEND`，不接受实盘私钥，也不存在发送路径。
+
+冻结候选达到以下全部门槛后，只能进入“执行基础设施人工评审”，不会自动开启实盘：至少100个部署后新候选事件、
+至少50个此前未出现的新Mint、终态完成率至少95%。`NO_ENTRY`代表没有持仓，只统计Fill Rate而不虚构亏损；
+已入场但`NO_EXIT`及快速情景中的快速窗口失败按-100%全损，
+买卖各扣0.01 SOL Jito成本后，主组合PF仍至少1.3。任何门槛未通过时Dashboard和导出均保持
+`COLLECT_MORE_DATA / TRADING_DISABLED`。
 
 - [Jito低延迟交易与Bundle说明](https://docs.jito.wtf/lowlatencytxnsend/)
 - [Jito低延迟区块数据说明](https://docs.jito.wtf/lowlatencytxnfeed/)
@@ -131,10 +142,12 @@ pnpm start
 把 `.env` 中的 `SDBR_GRPC_TOKEN` 换成自己的 LaserStream Token。Dashboard 默认地址：
 `http://127.0.0.1:8787`。
 
-默认的 `SDBR_INCLUDE_PUMP_LIFECYCLE=false` 是 Helius 节省模式：迁移后的全部 PumpSwap
-币、砸盘、严格同 Slot 买单和退出路径仍会完整采集；程序不再接收迁移前 Pump Program 的
-全量交易。此时池龄来源为首次观察时间下限，服务刚启动后的币会先经过原有1/5分钟池龄等待，
-不会把未知池龄误报为精确迁移池龄。只有确实需要精确迁移时间时才应将该开关设为 `true`。
+默认的`SDBR_STREAM_MODE=logs-status`才是真正的Helius轻量模式：迁移后的全部PumpSwap
+日志仍会采集，并与LaserStream小体积transaction status按Signature合并，从而保留严格同Slot
+排序，但不再为完整交易、账户列表和交易Meta付费。首次遇到新池时通常只需2次普通RPC读取
+Pool/Mint账户，随后使用内存缓存。`SDBR_INCLUDE_PUMP_LIFECYCLE=false`继续排除迁移前Pump
+Program全量交易，因此池龄来源为首次观察时间下限。紧急回退时可把`SDBR_STREAM_MODE`设为
+`full-transactions`；只有该模式才允许重新打开Pump生命周期订阅。
 
 也可回放已经标准化为一行一个 JSON 事件的 JSONL：
 
@@ -166,7 +179,7 @@ systemctl list-timers post-dump-recovery-backup.timer --all
 cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
-上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256。Manifest内置Go/No-Go研究就绪审计，自动检查实际Stream覆盖时长、Schema关键字段、观测质量已评估比例、R2-B5独立事件与独立币、主退出事件、Rank #2速度余量样本、终态完成率，以及1/2/5 SOL × 100/250/500ms九个组合是否齐全。`READY_FOR_GO_NO_GO_ANALYSIS`只表示数据足以进入人工分析，不代表程序自动批准实盘；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
+上传包包含24小时窗口数据库、Schema、Manifest、Git 提交号和逐文件 SHA-256。Manifest内置Go/No-Go研究就绪审计，自动检查实际Stream覆盖时长、Schema关键字段、观测质量已评估比例、R2-B5对照组，以及冻结候选`R2-B10-Q500-V1`的新事件、新Mint、终态完成率、1 SOL / 250ms全损PF和本地测速样本。导出只报告`COLLECT_MORE_DATA`或`READY_FOR_EXECUTION_REVIEW`，实盘决定始终为`TRADING_DISABLED`；最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
 
 ## 程序内置健康检查
@@ -179,6 +192,7 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 - 正常时每10分钟只向 systemd Journal 写一条简短日志。
 - 连续5次异常（默认约5分钟）才退出进程；服务器现有的 `Restart=always` 会自动拉起。
 - `/api/health` 的 `runtime.status` 会显示 `STARTING`、`HEALTHY` 或 `DEGRADED`。
+- 轻量模式额外检查日志/交易状态合并率；两侧各收到至少100条后持续低于90%，会进入`DEGRADED`并按现有systemd策略重连。
 
 因此不应再配置 OpenClaw 每10分钟轮询。可选环境变量包括
 `SDBR_HEALTH_CHECK_MS`、`SDBR_HEALTH_MAX_EVENT_STALE_MS`、`SDBR_HEALTH_MAX_PENDING_WRITES`、
@@ -201,25 +215,29 @@ node scripts/compact-event-window-db.js \
 
 ## 数据表
 
-- `trades`：仅限砸盘研究窗口的 AMM 事件、完整排序坐标、原始金额、储备、精度和逐笔费用。
+- `trades`：仅限砸盘研究窗口的 AMM 事件、完整排序坐标、原始金额、储备、精度、逐笔费用和`ingestion_mode`采集口径。
 - `slot_summaries`：transaction index 覆盖与 Slot 完整性统计。
 - `dump_events`：独立砸盘事件、毒性结果、恢复进度、生存率和二次砸盘。
 - `confirmations`：R1/R2/LQ 的确认时点与全部恢复特征。
 - `same_slot_observations`：不可执行的同 Slot 后续买单、排序可信度、金额、接收延迟和观测级数据质量状态。
-- `same_slot_shadow_simulations`：理论Rank #1/#2入场、`R1-RAW/R2-BASE/R2-B2/R2-B5`分组、发现/验证样本标签、第一笔买单金额、正确的两买单间隔、速度余量、数据质量状态、容量检查、快速/应急退出和扣费收益。
+- `same_slot_shadow_simulations`：理论Rank #1/#2入场、`R1-RAW/R2-BASE/R2-B2/R2-B5`对照和`R2-B10-Q500-V1`冻结候选、主组合标记、历史新币标记、第一笔买单金额、正确的两买单间隔、速度余量、数据质量状态、容量检查、快速/应急退出和扣费收益。
+- `candidate_excluded_mints`：冻结候选启用时一次性固化的历史Mint排除基线，重启不会把后续样本重新加入历史集合。
+- `execution_probes`：候选首买到达热路径时，临时Keypair在本机真实完成构建、签名和序列化的耗时与负载大小；Slot结束后再校验触发交易是否确为最终链上Rank #1。发送开关受数据库约束只能为0，链上落地和排名明确记录为未发送/不可测。
 - `simulations`：每个延迟、仓位、退出组合的请求时间、实际报价时间、Fill、成本与收益。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
 ## 当前边界
 
+- 默认`logs-status`模式用两条独立数据流按Signature合并：事件字段来自PumpSwap公开日志，严格排序来自LaserStream transaction status。它不接收完整交易元数据，首次看到每个池通常需要2次普通RPC读取；Dashboard会显示合并率、待合并消息、日志近似字节和RPC次数。Helius最终计费以控制台为准，程序显示的日志MB不包含协议开销。
+- 切换`SDBR_STREAM_MODE=full-transactions`可恢复旧的完整交易流，便于紧急对照，但会恢复高额LaserStream流量。轻量与完整模式分别写入`ingestion_mode`，分析时不可把接收延迟直接混为同一基础设施样本。
 - LaserStream 没有提供 `transactionIndex` 时，只能证明同 Slot 相关，不能证明严格执行顺序。
 - 即使存在严格排序的同 Slot 后续买单，也只是已经执行交易的观察结果，不代表机器人可以回到该位置成交。
 - 仅靠事件流无法可靠计算 Top Holder 或钱包关联集群；当前只支持信号前已知的 Creator、配置名单和历史毒性记录。
 - 未使用 RPC 补历史池龄。进程启动前已经存在的池子以“已观察时长下限”表示，因此初期会保守地拒绝池龄门槛。
 - 当前退出报价使用退出时观察到的公开池状态，没有把 Shadow 买入后的反事实储备逐笔重放；审计显示现有样本偏差约 0.01%–0.5%，
   对 5 SOL 影响更明显。V4 已在入场容量检查中正确更新一次买入后的储备，但持仓期间的后续公开成交仍未做完整反事实状态重放；实盘化前必须完成状态化回放。
-- 本项目不包含实盘执行。只有在 100–300 个独立事件、两个不重合时间窗口、全成本 PF ≥ 1.3、
-  200–500ms 延迟仍为正、最差 5% 可控且 Exit Fill Rate 可接受后，才应讨论下一阶段。
+- 本项目不包含实盘执行。冻结候选至少需要100个新事件、50个新Mint、全损PF ≥ 1.3且终态完成率≥95%，
+  再结合两个不重合时间窗口、最差5%和Exit Fill Rate进行人工评审；通过也只批准开发发送沙盒，不会自动投入SOL。
 
 ## 检查
 
@@ -230,4 +248,4 @@ pnpm test
 
 测试覆盖有效储备、signed virtual reserve、逐笔费用、Token 精度、严格/相关 Slot 标签、
 Same-Slot Rank #1/#2 Shadow、100/250/500ms快速退出与5秒/10秒应急退出、Creator拒绝、多钱包恢复、延迟入场、
-延迟退出、Rank #2两买单间隔、`R2-B2/R2-B5`分组、发现/验证样本隔离、异常储备隔离、NO_EXIT/Jito合并情景收益、SQLite批量写入和`NO_EXIT`独立统计。
+延迟退出、Rank #2两买单间隔、`R2-B2/R2-B5`对照、`R2-B10-Q500-V1`冻结候选、历史Mint隔离、临时Keypair本地测速、发送硬关闭、异常储备隔离、NO_EXIT/Jito全损情景、SQLite批量写入和`NO_EXIT`独立统计。

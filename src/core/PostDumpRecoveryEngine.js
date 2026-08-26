@@ -6,6 +6,7 @@ const { RecoveryConfirmer } = require('./RecoveryConfirmer');
 const { ExecutionSimulator } = require('./ExecutionSimulator');
 const { SameSlotProbe } = require('./SameSlotProbe');
 const { SameSlotShadowSimulator } = require('./SameSlotShadowSimulator');
+const { DryRunExecutionProbe } = require('./DryRunExecutionProbe');
 
 class PostDumpRecoveryEngine {
   constructor({ config, store, now = () => Date.now() }) {
@@ -23,8 +24,12 @@ class PostDumpRecoveryEngine {
       dataQualityConfig: config.sameSlotShadow || null,
       maxPriceBouncePct: config.recovery?.maxReportedRecoveryPct || 500,
     });
+    this.executionProbe = new DryRunExecutionProbe({
+      config: config.executionProbe || { enabled: false }, store, now,
+    });
     this.sameSlotShadow = new SameSlotShadowSimulator({
-      config: config.sameSlotShadow || { enabled: false }, store, now,
+      config: config.sameSlotShadow || { enabled: false }, store,
+      executionProbe: this.executionProbe, now,
     });
     this.execution = new ExecutionSimulator({ config: config.execution, store, now });
     this.metrics = {
@@ -126,6 +131,7 @@ class PostDumpRecoveryEngine {
       recovery: this.recovery.health(),
       sameSlotProbe: this.sameSlotProbe.health(),
       sameSlotShadow: this.sameSlotShadow.health(),
+      executionProbe: this.executionProbe.health(),
       execution: this.execution.health(),
     };
   }

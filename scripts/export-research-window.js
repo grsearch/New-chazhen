@@ -6,6 +6,10 @@ const Database = require('better-sqlite3');
 const { PUMP_PARSE_VERSION } = require('../src/core/PumpEventParser');
 
 const MAX_DUMP_DROP_PCT = Number(process.env.SDBR_MAX_DUMP_DROP_PCT || 40);
+const CANDIDATE_PROFILE_ID = 'R2-B10-Q500-V1';
+const CANDIDATE_COHORT_STAGE = 'HOLDOUT_B10_Q500_V1';
+const CANDIDATE_PRIMARY_POSITION_SOL = 1;
+const CANDIDATE_PRIMARY_EXIT_HORIZON_MS = 250;
 
 const EXPLICIT_FILTERS = Object.freeze({
   trades: {
@@ -33,6 +37,10 @@ const EXPLICIT_FILTERS = Object.freeze({
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
     bind: () => [],
   },
+  execution_probes: {
+    where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
+    bind: () => [],
+  },
   simulations: {
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
     bind: () => [],
@@ -49,10 +57,12 @@ const ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
     'received_at_ms', 'slot', 'transaction_index', 'instruction_index', 'event_index',
     'signature', 'mint', 'pool', 'side', 'sol_amount', 'event_price', 'reserve_price',
     'effective_quote_reserves_raw', 'total_fee_bps', 'parse_version',
+    'ingestion_mode',
   ],
   slot_summaries: ['first_received_at_ms', 'last_received_at_ms'],
   dump_events: [
     'episode_id', 'mint', 'detected_at_ms', 'drop_pct', 'toxic_rejected', 'parse_version',
+    'ingestion_mode',
   ],
   same_slot_observations: [
     'episode_id', 'observed_at_ms', 'buy_transaction_index', 'instruction_index',
@@ -63,6 +73,13 @@ const ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
     'exit_horizon_ms', 'status', 'competitor_gap_ms', 'competitor_headroom_ms',
     'response_budget_ms', 'trigger_buy_sol', 'data_quality_status', 'entry_at_ms',
     'exit_reason', 'rescue_horizon_ms', 'net_return_pct', 'hold_ms',
+    'candidate_profile_id', 'candidate_cohort_stage', 'candidate_primary',
+    'candidate_novel_mint',
+  ],
+  execution_probes: [
+    'episode_id', 'candidate_profile_id', 'mode', 'status', 'build_duration_us',
+    'sign_duration_us', 'serialize_duration_us', 'send_enabled', 'send_status',
+    'landing_status', 'rank_status', 'trigger_signature', 'chain_validation_status',
   ],
 });
 
@@ -74,6 +91,9 @@ const GO_NO_GO_THRESHOLDS = Object.freeze({
   minimumHeadroomSampleEpisodes: 30,
   minimumTerminalRowsPct: 95,
   minimumAssessedObservationPct: 90,
+  minimumCandidateEpisodes: 100,
+  minimumCandidateMints: 50,
+  minimumCandidateFullLossProfitFactor: 1.3,
   requiredPositionsSol: [1, 2, 5],
   requiredExitHorizonsMs: [100, 250, 500],
 });
@@ -94,7 +114,8 @@ function quoteIdentifier(value) {
 
 function chooseFilter(table, columns) {
   if (EXPLICIT_FILTERS[table]) return EXPLICIT_FILTERS[table];
-  if (table === 'schema_meta' || table === 'toxic_wallets') {
+  if (table === 'schema_meta' || table === 'toxic_wallets'
+    || table === 'candidate_excluded_mints') {
     return { where: '1 = 1', bind: () => [], fullTable: true };
   }
   const anchor = GENERIC_TIME_COLUMNS.find((column) => columns.includes(column));
@@ -137,6 +158,13 @@ function percentage(part, whole) {
   return whole > 0 ? part / whole * 100 : null;
 }
 
+function profitFactor(values) {
+  const wins = values.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
+  const losses = Math.abs(values.filter((value) => value < 0)
+    .reduce((sum, value) => sum + value, 0));
+  return values.length ? (losses > 0 ? wins / losses : (wins > 0 ? null : 0)) : null;
+}
+
 function researchReadiness(databasePath, startMs, endMs) {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
@@ -168,6 +196,15 @@ function researchReadiness(databasePath, startMs, endMs) {
         positiveHeadroomEpisodes: 0, positiveHeadroomPct: null,
         quarantinedRows: 0, cohortCount: 0, cohorts: [],
       },
+      candidate: {
+        profileId: CANDIDATE_PROFILE_ID, episodes: 0, mints: 0, rows: 0,
+        terminalRows: 0, terminalRowsPct: null, fullLossProfitFactor: null,
+        enteredTerminalRows: 0, noEntryRows: 0, averageNetReturnPct: null,
+        probeSamples: 0, chainValidatedProbeSamples: 0, chainRejectedProbeSamples: 0,
+        realLandingSamples: 0,
+        realRankSamples: 0,
+      },
+      ingestion: { tradeRowsByMode: {}, dumpEpisodesByMode: {} },
     };
     let metrics = empty;
     if (!blockingMissingColumns.length) {
@@ -199,6 +236,14 @@ function researchReadiness(databasePath, startMs, endMs) {
             SUM(CASE WHEN data_quality_status='QUARANTINED' THEN 1 ELSE 0 END) quarantined
           FROM same_slot_observations
         `).get();
+      const tradeRowsByMode = Object.fromEntries(db.prepare(`
+        SELECT COALESCE(ingestion_mode,'UNKNOWN') mode,COUNT(*) count
+        FROM trades GROUP BY COALESCE(ingestion_mode,'UNKNOWN')
+      `).all().map((row) => [row.mode, row.count]));
+      const dumpEpisodesByMode = Object.fromEntries(db.prepare(`
+        SELECT COALESCE(ingestion_mode,'UNKNOWN') mode,COUNT(*) count
+        FROM dump_events GROUP BY COALESCE(ingestion_mode,'UNKNOWN')
+      `).all().map((row) => [row.mode, row.count]));
       const b5 = db.prepare(`
         SELECT COUNT(DISTINCT CASE WHEN COALESCE(data_quality_status,'UNASSESSED')<>
             'QUARANTINED' THEN s.episode_id END) episodes,
@@ -250,6 +295,40 @@ function researchReadiness(databasePath, startMs, endMs) {
         GROUP BY position_sol,exit_horizon_ms
         ORDER BY position_sol,exit_horizon_ms
       `).all();
+      const candidateRows = db.prepare(`
+        SELECT s.episode_id episodeId,d.mint,s.status,s.exit_reason exitReason,
+          s.position_sol positionSol,s.modeled_jito_tip_sol modeledTipSol,
+          s.net_return_pct netReturnPct
+        FROM same_slot_shadow_simulations s
+        JOIN dump_events d ON d.episode_id=s.episode_id
+        WHERE s.candidate_profile_id=? AND s.candidate_cohort_stage=?
+          AND s.candidate_primary=1 AND s.candidate_novel_mint=1
+          AND s.position_sol=? AND s.exit_horizon_ms=?
+          AND COALESCE(s.data_quality_status,'UNASSESSED')='TRUSTED'
+      `).all(CANDIDATE_PROFILE_ID, CANDIDATE_COHORT_STAGE,
+        CANDIDATE_PRIMARY_POSITION_SOL, CANDIDATE_PRIMARY_EXIT_HORIZON_MS);
+      const candidateTerminal = candidateRows
+        .filter((row) => ['CLOSED', 'NO_EXIT', 'NO_ENTRY'].includes(row.status));
+      const candidateEnteredTerminal = candidateTerminal
+        .filter((row) => ['CLOSED', 'NO_EXIT'].includes(row.status));
+      const candidateValues = candidateEnteredTerminal.map((row) => {
+        const position = Number(row.positionSol) || 1;
+        const extraJitoPct = (0.01 - Math.max(0, Number(row.modeledTipSol) || 0))
+          * 2 / position * 100;
+        return row.status === 'CLOSED'
+          ? Number(row.netReturnPct) - extraJitoPct : -100 - extraJitoPct;
+      }).filter(Number.isFinite);
+      const probeMetrics = db.prepare(`
+        SELECT COUNT(*) samples,
+          SUM(CASE WHEN chain_validation_status='MATCHED_FINAL_CHAIN_RANK_1'
+            THEN 1 ELSE 0 END) chain_validated_samples,
+          SUM(CASE WHEN chain_validation_status='TRIGGER_WAS_NOT_FINAL_CHAIN_RANK_1'
+            THEN 1 ELSE 0 END) chain_rejected_samples,
+          SUM(CASE WHEN landing_status NOT IN ('NOT_SENT','DISABLED') THEN 1 ELSE 0 END)
+            real_landing_samples,
+          SUM(CASE WHEN landed_rank IS NOT NULL THEN 1 ELSE 0 END) real_rank_samples
+        FROM execution_probes WHERE candidate_profile_id=?
+      `).get(CANDIDATE_PROFILE_ID);
       const rows = Number(b5.rows) || 0;
       const terminalRows = Number(b5.terminal_rows) || 0;
       const headroomSamples = Number(b5.headroom_sample_episodes) || 0;
@@ -290,6 +369,27 @@ function researchReadiness(databasePath, startMs, endMs) {
           cohortCount: cohorts.length,
           cohorts,
         },
+        candidate: {
+          profileId: CANDIDATE_PROFILE_ID,
+          cohortStage: CANDIDATE_COHORT_STAGE,
+          episodes: new Set(candidateRows.map((row) => row.episodeId)).size,
+          mints: new Set(candidateRows.map((row) => row.mint)).size,
+          rows: candidateRows.length,
+          terminalRows: candidateTerminal.length,
+          terminalRowsPct: percentage(candidateTerminal.length, candidateRows.length),
+          enteredTerminalRows: candidateEnteredTerminal.length,
+          noEntryRows: candidateTerminal.filter((row) => row.status === 'NO_ENTRY').length,
+          fullLossProfitFactor: profitFactor(candidateValues),
+          averageNetReturnPct: candidateValues.length
+            ? candidateValues.reduce((sum, value) => sum + value, 0) / candidateValues.length
+            : null,
+          probeSamples: probeMetrics.samples || 0,
+          chainValidatedProbeSamples: probeMetrics.chain_validated_samples || 0,
+          chainRejectedProbeSamples: probeMetrics.chain_rejected_samples || 0,
+          realLandingSamples: probeMetrics.real_landing_samples || 0,
+          realRankSamples: probeMetrics.real_rank_samples || 0,
+        },
+        ingestion: { tradeRowsByMode, dumpEpisodesByMode },
       };
     }
     const expectedCohorts = GO_NO_GO_THRESHOLDS.requiredPositionsSol.flatMap(
@@ -352,11 +452,37 @@ function researchReadiness(databasePath, startMs, endMs) {
         id: 'ALL_POSITION_EXIT_COHORTS', passed: missingCohorts.length === 0,
         actual: metrics.b5.cohortCount, required: expectedCohorts.length,
       },
+      {
+        id: 'NEW_CANDIDATE_EPISODES',
+        passed: metrics.candidate.episodes >= GO_NO_GO_THRESHOLDS.minimumCandidateEpisodes,
+        actual: metrics.candidate.episodes,
+        required: GO_NO_GO_THRESHOLDS.minimumCandidateEpisodes,
+      },
+      {
+        id: 'NEW_CANDIDATE_MINTS',
+        passed: metrics.candidate.mints >= GO_NO_GO_THRESHOLDS.minimumCandidateMints,
+        actual: metrics.candidate.mints,
+        required: GO_NO_GO_THRESHOLDS.minimumCandidateMints,
+      },
+      {
+        id: 'CANDIDATE_TERMINAL_ROWS_PCT',
+        passed: (metrics.candidate.terminalRowsPct || 0)
+          >= GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+        actual: metrics.candidate.terminalRowsPct,
+        required: GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+      },
+      {
+        id: 'CANDIDATE_FULL_LOSS_PROFIT_FACTOR',
+        passed: (metrics.candidate.fullLossProfitFactor || 0)
+          >= GO_NO_GO_THRESHOLDS.minimumCandidateFullLossProfitFactor,
+        actual: metrics.candidate.fullLossProfitFactor,
+        required: GO_NO_GO_THRESHOLDS.minimumCandidateFullLossProfitFactor,
+      },
     ];
     const ready = gates.every((gate) => gate.passed);
     return {
-      status: ready ? 'READY_FOR_GO_NO_GO_ANALYSIS' : 'COLLECT_MORE_DATA',
-      liveTradingDecision: 'NOT_DECIDED_BY_EXPORT',
+      status: ready ? 'READY_FOR_EXECUTION_REVIEW' : 'COLLECT_MORE_DATA',
+      liveTradingDecision: 'TRADING_DISABLED',
       note: 'Readiness only means the dataset can support analysis; it is not permission to trade.',
       schemaVersion,
       windowHours,

@@ -54,6 +54,22 @@ function returnStats(rows) {
   };
 }
 
+function numericScenarioStats(values) {
+  const finiteValues = values.filter(Number.isFinite);
+  const wins = finiteValues.filter((item) => item > 0);
+  const losses = finiteValues.filter((item) => item < 0);
+  const grossWins = wins.reduce((sum, item) => sum + item, 0);
+  const grossLosses = Math.abs(losses.reduce((sum, item) => sum + item, 0));
+  return {
+    samples: finiteValues.length,
+    averageNetReturnPct: finiteValues.length
+      ? finiteValues.reduce((sum, item) => sum + item, 0) / finiteValues.length : null,
+    winRatePct: finiteValues.length ? wins.length / finiteValues.length * 100 : null,
+    profitFactor: finiteValues.length
+      ? (grossLosses > 0 ? grossWins / grossLosses : (grossWins > 0 ? null : 0)) : null,
+  };
+}
+
 function shadowScenarioStats({
   closedRows, noExit, noExitLossPcts = [-15, -100], jitoTipScenariosSol = [],
   positionSol = null, modeledTipSol = null,
@@ -162,6 +178,7 @@ class ResearchStore {
       sameSlotMaxTradeSol: 1_000,
       sameSlotNoExitScenarioLossPcts: [-15, -100],
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
+      sameSlotCandidate: { enabled: false },
       maxReportedRecoveryPct: 500,
       ...config,
     };
@@ -202,7 +219,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '10')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '12')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -239,6 +256,7 @@ class ResearchStore {
         buyback_fee_bps REAL,
         total_fee_bps REAL,
         parse_version TEXT,
+        ingestion_mode TEXT,
         raw_json TEXT,
         UNIQUE(signature, event_index)
       );
@@ -296,6 +314,7 @@ class ResearchStore {
         pre_largest_buyer_share_pct REAL,
         pre_price_runup_pct REAL,
         parse_version TEXT,
+        ingestion_mode TEXT,
         valid_buy_sol REAL DEFAULT 0,
         raw_buy_sol REAL DEFAULT 0,
         follow_sell_sol REAL DEFAULT 0,
@@ -384,6 +403,11 @@ class ResearchStore {
         target_rank INTEGER NOT NULL,
         entry_profile_id TEXT NOT NULL DEFAULT 'LEGACY',
         cohort_stage TEXT NOT NULL DEFAULT 'LEGACY',
+        candidate_profile_id TEXT,
+        candidate_cohort_stage TEXT,
+        candidate_primary INTEGER NOT NULL DEFAULT 0,
+        candidate_novel_mint INTEGER,
+        candidate_criteria_json TEXT,
         position_sol REAL NOT NULL,
         exit_horizon_ms INTEGER NOT NULL,
         quote_model TEXT NOT NULL,
@@ -555,6 +579,8 @@ class ResearchStore {
     this._ensureColumn('simulations', 'entry_capacity_round_trip_loss_pct', 'REAL');
     this._ensureColumn('simulations', 'entry_capacity_exit_liquidity_usage_pct', 'REAL');
     this._ensureColumn('dump_events', 'parse_version', 'TEXT');
+    this._ensureColumn('trades', 'ingestion_mode', 'TEXT');
+    this._ensureColumn('dump_events', 'ingestion_mode', 'TEXT');
     this._ensureColumn('same_slot_observations', 'data_quality_status',
       "TEXT NOT NULL DEFAULT 'UNASSESSED'");
     this._ensureColumn('same_slot_observations', 'data_quality_reasons_json', 'TEXT');
@@ -562,6 +588,12 @@ class ResearchStore {
       "TEXT NOT NULL DEFAULT 'LEGACY'");
     this._ensureColumn('same_slot_shadow_simulations', 'cohort_stage',
       "TEXT NOT NULL DEFAULT 'LEGACY'");
+    this._ensureColumn('same_slot_shadow_simulations', 'candidate_profile_id', 'TEXT');
+    this._ensureColumn('same_slot_shadow_simulations', 'candidate_cohort_stage', 'TEXT');
+    this._ensureColumn('same_slot_shadow_simulations', 'candidate_primary',
+      'INTEGER NOT NULL DEFAULT 0');
+    this._ensureColumn('same_slot_shadow_simulations', 'candidate_novel_mint', 'INTEGER');
+    this._ensureColumn('same_slot_shadow_simulations', 'candidate_criteria_json', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'latency_model',
       "TEXT NOT NULL DEFAULT 'LEGACY_DUMP_TO_COMPETITOR'");
     this._ensureColumn('same_slot_shadow_simulations', 'competitor_reference_at_ms', 'INTEGER');
@@ -582,11 +614,63 @@ class ResearchStore {
     this._ensureColumn('same_slot_shadow_simulations', 'rescue_attempted_horizons_json', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'primary_no_exit_reason', 'TEXT');
     this._ensureColumn('same_slot_shadow_simulations', 'exit_reason', 'TEXT');
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS candidate_excluded_mints (
+        profile_id TEXT NOT NULL,
+        mint TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        first_seen_at_ms INTEGER,
+        PRIMARY KEY(profile_id,mint)
+      );
+      CREATE TABLE IF NOT EXISTS execution_probes (
+        probe_id TEXT PRIMARY KEY,
+        episode_id TEXT NOT NULL REFERENCES dump_events(episode_id),
+        shadow_id TEXT,
+        candidate_profile_id TEXT NOT NULL,
+        candidate_cohort_stage TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        model TEXT NOT NULL,
+        status TEXT NOT NULL,
+        trigger_signature TEXT,
+        chain_validation_status TEXT NOT NULL DEFAULT 'PENDING_SLOT_FINALIZATION',
+        trigger_at_ms INTEGER,
+        measured_at_ms INTEGER NOT NULL,
+        trigger_to_probe_ms REAL,
+        build_duration_us REAL,
+        sign_duration_us REAL,
+        serialize_duration_us REAL,
+        total_local_duration_us REAL,
+        payload_bytes INTEGER,
+        send_enabled INTEGER NOT NULL DEFAULT 0 CHECK(send_enabled=0),
+        send_status TEXT NOT NULL,
+        send_duration_us REAL,
+        landing_status TEXT NOT NULL,
+        landing_duration_ms REAL,
+        landed_signature TEXT,
+        landed_slot INTEGER,
+        landed_transaction_index INTEGER,
+        landed_rank INTEGER,
+        rank_status TEXT NOT NULL,
+        error TEXT,
+        created_at_ms INTEGER NOT NULL,
+        updated_at_ms INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_execution_probe_candidate
+        ON execution_probes(candidate_profile_id,measured_at_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_same_slot_candidate
+        ON same_slot_shadow_simulations(
+          candidate_profile_id,candidate_primary,candidate_novel_mint,status
+        );
+    `);
+    this._ensureColumn('execution_probes', 'trigger_signature', 'TEXT');
+    this._ensureColumn('execution_probes', 'chain_validation_status',
+      "TEXT NOT NULL DEFAULT 'PENDING_SLOT_FINALIZATION'");
     this.db.prepare(`
       UPDATE same_slot_shadow_simulations
       SET entry_profile_id='R2-B5',cohort_stage='DISCOVERY_RECLASSIFIED_20260824'
       WHERE target_rank=2 AND entry_profile_id='R2-B2' AND trigger_buy_sol>=?
     `).run(this.config.sameSlotStrongTriggerBuySol);
+    this._initializeCandidateBaseline();
     this.db.prepare(`
       UPDATE same_slot_observations
       SET data_quality_status='QUARANTINED',
@@ -617,6 +701,16 @@ class ResearchStore {
       )
       WHERE parse_version IS NULL
     `);
+    this.db.exec(`
+      UPDATE dump_events
+      SET ingestion_mode=(
+        SELECT t.ingestion_mode FROM trades t
+        WHERE t.signature=dump_events.signature
+          AND t.event_index=dump_events.event_index
+        LIMIT 1
+      )
+      WHERE ingestion_mode IS NULL
+    `);
   }
 
   _ensureColumn(table, column, definition) {
@@ -635,7 +729,7 @@ class ResearchStore {
           token_decimals, token_decimals_source, base_amount_raw, user_quote_amount_raw,
           pool_base_reserves_raw, pool_quote_reserves_raw, virtual_quote_reserves_raw,
           effective_quote_reserves_raw, lp_fee_bps, protocol_fee_bps, creator_fee_bps,
-          buyback_fee_bps, total_fee_bps, parse_version, raw_json
+          buyback_fee_bps, total_fee_bps, parse_version, ingestion_mode, raw_json
         ) VALUES (
           @receivedAtMs, @chainTimestampMs, @slot, @transactionIndex, @instructionIndex,
           @eventIndex, @receiveSequence, @signature, @orderingConfidence, @mint, @pool,
@@ -643,7 +737,7 @@ class ResearchStore {
           @tokenDecimals, @tokenDecimalsSource, @baseAmountRaw, @userQuoteAmountRaw,
           @poolBaseReservesRaw, @poolQuoteReservesRaw, @virtualQuoteReservesRaw,
           @effectiveQuoteReservesRaw, @lpFeeBps, @protocolFeeBps, @creatorFeeBps,
-          @buybackFeeBps, @totalFeeBps, @parseVersion, @rawJson
+          @buybackFeeBps, @totalFeeBps, @parseVersion, @ingestionMode, @rawJson
         )
       `),
       slot: this.db.prepare(`
@@ -669,7 +763,8 @@ class ResearchStore {
           low_price,drop_pct,pre_quote_sol,post_quote_sol,sell_to_quote_pct,
           sell_token_to_reserve_pct,pool_age_ms,pool_age_source,pre_trades,pre_buy_sol,
           pre_sell_sol,pre_net_flow_sol,pre_buy_share_pct,pre_unique_buyers,
-          pre_largest_buyer_share_pct,pre_price_runup_pct,parse_version,updated_at_ms
+          pre_largest_buyer_share_pct,pre_price_runup_pct,parse_version,ingestion_mode,
+          updated_at_ms
         ) VALUES (
           @episodeId,@mint,@pool,@seller,@coinCreator,@detectedAtMs,@chainTimestampMs,@slot,
           @transactionIndex,@instructionIndex,@eventIndex,@signature,@orderingConfidence,
@@ -678,7 +773,7 @@ class ResearchStore {
           @lowPrice,@dropPct,@preQuoteSol,@postQuoteSol,@sellToQuotePct,
           @sellTokenToReservePct,@poolAgeMs,@poolAgeSource,@preTrades,@preBuySol,
           @preSellSol,@preNetFlowSol,@preBuySharePct,@preUniqueBuyers,
-          @preLargestBuyerSharePct,@prePriceRunupPct,@parseVersion,@updatedAtMs
+          @preLargestBuyerSharePct,@prePriceRunupPct,@parseVersion,@ingestionMode,@updatedAtMs
         )
       `),
       dumpUpdate: this.db.prepare(`
@@ -731,7 +826,9 @@ class ResearchStore {
       `),
       sameSlotShadow: this.db.prepare(`
         INSERT INTO same_slot_shadow_simulations (
-          shadow_id,episode_id,target_rank,entry_profile_id,cohort_stage,position_sol,
+          shadow_id,episode_id,target_rank,entry_profile_id,cohort_stage,
+          candidate_profile_id,candidate_cohort_stage,candidate_primary,
+          candidate_novel_mint,candidate_criteria_json,position_sol,
           exit_horizon_ms,quote_model,
           status,rejection_reason,infrastructure_mode,infrastructure_executable,
           infrastructure_reason,parse_budget_ms,build_budget_ms,sign_budget_ms,
@@ -754,7 +851,9 @@ class ResearchStore {
           proceeds_sol,total_cost_sol,gross_return_pct,net_return_pct,hold_ms,
           created_at_ms,updated_at_ms
         ) VALUES (
-          @shadowId,@episodeId,@targetRank,@entryProfileId,@cohortStage,@positionSol,
+          @shadowId,@episodeId,@targetRank,@entryProfileId,@cohortStage,
+          @candidateProfileId,@candidateCohortStage,@candidatePrimary,
+          @candidateNovelMint,@candidateCriteriaJson,@positionSol,
           @exitHorizonMs,@quoteModel,
           @status,@rejectionReason,@infrastructureMode,@infrastructureExecutable,
           @infrastructureReason,@parseBudgetMs,@buildBudgetMs,@signBudgetMs,
@@ -780,6 +879,11 @@ class ResearchStore {
           status=excluded.status,rejection_reason=excluded.rejection_reason,
           entry_profile_id=excluded.entry_profile_id,
           cohort_stage=excluded.cohort_stage,
+          candidate_profile_id=excluded.candidate_profile_id,
+          candidate_cohort_stage=excluded.candidate_cohort_stage,
+          candidate_primary=excluded.candidate_primary,
+          candidate_novel_mint=excluded.candidate_novel_mint,
+          candidate_criteria_json=excluded.candidate_criteria_json,
           latency_model=excluded.latency_model,
           competitor_observed_at_ms=excluded.competitor_observed_at_ms,
           competitor_receive_lag_ms=excluded.competitor_receive_lag_ms,
@@ -884,6 +988,36 @@ class ResearchStore {
           last_reason=excluded.last_reason,last_seen_at_ms=excluded.last_seen_at_ms,
           last_episode_id=excluded.last_episode_id
       `),
+      executionProbe: this.db.prepare(`
+        INSERT INTO execution_probes(
+          probe_id,episode_id,shadow_id,candidate_profile_id,candidate_cohort_stage,
+          mode,model,status,trigger_signature,chain_validation_status,
+          trigger_at_ms,measured_at_ms,trigger_to_probe_ms,
+          build_duration_us,sign_duration_us,serialize_duration_us,total_local_duration_us,
+          payload_bytes,send_enabled,send_status,send_duration_us,landing_status,
+          landing_duration_ms,landed_signature,landed_slot,landed_transaction_index,
+          landed_rank,rank_status,error,created_at_ms,updated_at_ms
+        ) VALUES (
+          @probeId,@episodeId,@shadowId,@candidateProfileId,@candidateCohortStage,
+          @mode,@model,@status,@triggerSignature,@chainValidationStatus,
+          @triggerAtMs,@measuredAtMs,@triggerToProbeMs,
+          @buildDurationUs,@signDurationUs,@serializeDurationUs,@totalLocalDurationUs,
+          @payloadBytes,0,@sendStatus,@sendDurationUs,@landingStatus,
+          @landingDurationMs,@landedSignature,@landedSlot,@landedTransactionIndex,
+          @landedRank,@rankStatus,@error,@createdAtMs,@updatedAtMs
+        ) ON CONFLICT(probe_id) DO UPDATE SET
+          shadow_id=excluded.shadow_id,status=excluded.status,
+          trigger_signature=excluded.trigger_signature,
+          chain_validation_status=excluded.chain_validation_status,
+          trigger_to_probe_ms=excluded.trigger_to_probe_ms,
+          build_duration_us=excluded.build_duration_us,
+          sign_duration_us=excluded.sign_duration_us,
+          serialize_duration_us=excluded.serialize_duration_us,
+          total_local_duration_us=excluded.total_local_duration_us,
+          payload_bytes=excluded.payload_bytes,send_status=excluded.send_status,
+          landing_status=excluded.landing_status,rank_status=excluded.rank_status,
+          error=excluded.error,updated_at_ms=excluded.updated_at_ms
+      `),
       pruneTrades: this.db.prepare(`
         DELETE FROM trades WHERE id IN (
           SELECT id FROM trades WHERE received_at_ms < ? LIMIT ?
@@ -928,6 +1062,7 @@ class ResearchStore {
       creatorFeeBps: number(trade.coinCreatorFeeBasisPoints),
       buybackFeeBps: number(trade.buybackFeeBasisPoints), totalFeeBps: number(trade.totalFeeBps),
       parseVersion: value(trade.parseVersion),
+      ingestionMode: value(trade.ingestionMode || 'UNKNOWN'),
       rawJson: this.config.storeTradeRawJson ? json(trade) : null,
     });
   }
@@ -954,6 +1089,7 @@ class ResearchStore {
       preLargestBuyerSharePct: number(pre.largestBuyerSharePct),
       prePriceRunupPct: number(pre.priceRunupPct),
       parseVersion: value(dump.parseVersion || dump.signalTrade?.parseVersion),
+      ingestionMode: value(dump.ingestionMode || dump.signalTrade?.ingestionMode || 'UNKNOWN'),
       updatedAtMs: dump.detectedAtMs,
     });
   }
@@ -1011,12 +1147,41 @@ class ResearchStore {
     });
   }
 
+  _initializeCandidateBaseline() {
+    const candidate = this.config.sameSlotCandidate || {};
+    if (!candidate.enabled || !candidate.profileId) return;
+    const marker = `candidate_baseline:${candidate.profileId}`;
+    if (this.db.prepare('SELECT 1 FROM schema_meta WHERE key=?').get(marker)) return;
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT OR IGNORE INTO candidate_excluded_mints(
+          profile_id,mint,reason,first_seen_at_ms
+        )
+        SELECT ?,d.mint,'PRE_HOLDOUT_HISTORY',MIN(d.detected_at_ms)
+        FROM dump_events d
+        WHERE d.mint IS NOT NULL
+        GROUP BY d.mint
+      `).run(candidate.profileId);
+      this.db.prepare('INSERT INTO schema_meta(key,value) VALUES(?,?)')
+        .run(marker, String(Date.now()));
+    })();
+  }
+
+  isCandidateMintExcluded(profileId, mint) {
+    if (!profileId || !mint) return false;
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM candidate_excluded_mints WHERE profile_id=? AND mint=?
+    `).get(profileId, mint));
+  }
+
   insertSameSlotShadow(simulation) { this._upsertSameSlotShadow(simulation); }
   updateSameSlotShadow(simulation) { this._upsertSameSlotShadow(simulation); }
 
   _upsertSameSlotShadow(row) {
     const fields = [
-      'shadowId','episodeId','targetRank','entryProfileId','cohortStage','positionSol',
+      'shadowId','episodeId','targetRank','entryProfileId','cohortStage',
+      'candidateProfileId','candidateCohortStage','candidatePrimary','candidateNovelMint',
+      'positionSol',
       'exitHorizonMs','quoteModel',
       'status','rejectionReason','infrastructureMode','infrastructureReason',
       'parseBudgetMs','buildBudgetMs','signBudgetMs','sendBudgetMs','responseBudgetMs',
@@ -1040,6 +1205,10 @@ class ResearchStore {
     for (const field of fields) params[field] = value(row[field]);
     params.entryProfileId = row.entryProfileId || 'LEGACY';
     params.cohortStage = row.cohortStage || 'LEGACY';
+    params.candidatePrimary = row.candidatePrimary ? 1 : 0;
+    params.candidateNovelMint = row.candidateNovelMint == null
+      ? null : (row.candidateNovelMint ? 1 : 0);
+    params.candidateCriteriaJson = json(row.candidateCriteria);
     params.latencyModel = row.latencyModel || 'LEGACY_DUMP_TO_COMPETITOR';
     params.dataQualityStatus = row.dataQualityStatus || 'UNASSESSED';
     params.dataQualityReasonsJson = json(row.dataQualityReasons);
@@ -1051,6 +1220,23 @@ class ResearchStore {
     params.createdAtMs = number(row.createdAtMs) || Date.now();
     params.updatedAtMs = number(row.updatedAtMs) || params.createdAtMs;
     this._enqueue(this.statements.sameSlotShadow, params);
+  }
+
+  upsertExecutionProbe(row) {
+    const params = {};
+    const fields = [
+      'probeId','episodeId','shadowId','candidateProfileId','candidateCohortStage',
+      'mode','model','status','triggerSignature','chainValidationStatus',
+      'triggerAtMs','measuredAtMs','triggerToProbeMs',
+      'buildDurationUs','signDurationUs','serializeDurationUs','totalLocalDurationUs',
+      'payloadBytes','sendStatus','sendDurationUs','landingStatus','landingDurationMs',
+      'landedSignature','landedSlot','landedTransactionIndex','landedRank','rankStatus',
+      'error','createdAtMs','updatedAtMs',
+    ];
+    for (const field of fields) params[field] = value(row[field]);
+    params.createdAtMs = number(row.createdAtMs) || Date.now();
+    params.updatedAtMs = number(row.updatedAtMs) || params.createdAtMs;
+    this._enqueue(this.statements.executionProbe, params);
   }
 
   insertSimulation(simulation) { this._upsertSimulation(simulation); }
@@ -1443,6 +1629,7 @@ class ResearchStore {
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       this.config.maxReportedRecoveryPct);
     const eligibleDumps = Math.max(0, dump.independent - (dump.toxic_rejected || 0));
+    const candidateSummary = this.sameSlotCandidateSummary();
     return {
       generatedAtMs: Date.now(),
       dumps: {
@@ -1555,6 +1742,7 @@ class ResearchStore {
           jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
         }),
       },
+      sameSlotCandidate: candidateSummary,
       execution: {
         scheduled: simulationCounts.scheduled,
         entryFilled: simulationCounts.entry_filled || 0,
@@ -1584,6 +1772,116 @@ class ResearchStore {
       cohorts: this.cohorts(),
       sameSlotShadowCohorts: this.sameSlotShadowCohorts(),
       store: this.health(),
+    };
+  }
+
+  sameSlotCandidateSummary() {
+    const candidate = this.config.sameSlotCandidate || {};
+    if (!candidate.enabled || !candidate.profileId) {
+      return { enabled: false, tradingEnabled: false, status: 'DISABLED' };
+    }
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
+    const rows = this.db.prepare(`
+      SELECT s.episode_id episodeId,d.mint,s.status,s.exit_reason exitReason,
+        s.position_sol positionSol,s.modeled_jito_tip_sol modeledJitoTipSol,
+        s.net_return_pct netReturnPct
+      FROM same_slot_shadow_simulations s
+      JOIN dump_events d ON d.episode_id=s.episode_id
+      WHERE s.candidate_profile_id=? AND s.candidate_cohort_stage=?
+        AND s.candidate_primary=1 AND s.candidate_novel_mint=1
+        AND s.position_sol=? AND s.exit_horizon_ms=?
+        AND COALESCE(s.data_quality_status,'UNASSESSED')='TRUSTED'
+        AND (d.drop_pct IS NULL OR d.drop_pct<=?)
+        AND (? IS NULL OR d.parse_version=?)
+    `).all(candidate.profileId, candidate.cohortStage, candidate.primaryPositionSol,
+      candidate.primaryExitHorizonMs, this.config.maxDumpDropPct,
+      acceptedVersion, acceptedVersion);
+    const terminal = rows.filter((row) => ['CLOSED', 'NO_EXIT', 'NO_ENTRY'].includes(row.status));
+    const enteredTerminal = terminal.filter((row) => ['CLOSED', 'NO_EXIT'].includes(row.status));
+    const scenarioValue = (row, quickOnly) => {
+      const modeledTip = Math.max(0, number(row.modeledJitoTipSol) || 0);
+      const position = number(row.positionSol);
+      const extraJitoPct = position > 0
+        ? (candidate.jitoTipSol - modeledTip) * 2 / position * 100 : 0;
+      const closed = row.status === 'CLOSED' && (!quickOnly || row.exitReason === 'PRIMARY');
+      return closed ? number(row.netReturnPct) - extraJitoPct
+        : candidate.noExitLossPct - extraJitoPct;
+    };
+    const fullLoss = numericScenarioStats(enteredTerminal.map((row) => scenarioValue(row, false)));
+    const quickFullLoss = numericScenarioStats(
+      enteredTerminal.map((row) => scenarioValue(row, true)),
+    );
+    const episodes = new Set(rows.map((row) => row.episodeId)).size;
+    const mints = new Set(rows.map((row) => row.mint)).size;
+    const terminalPct = rows.length ? terminal.length / rows.length * 100 : null;
+    const probes = this.db.prepare(`
+      SELECT COUNT(*) measured,
+        AVG(build_duration_us) average_build_us,
+        AVG(sign_duration_us) average_sign_us,
+        AVG(serialize_duration_us) average_serialize_us,
+        AVG(total_local_duration_us) average_total_local_us,
+        AVG(trigger_to_probe_ms) average_trigger_to_probe_ms,
+        SUM(CASE WHEN chain_validation_status='MATCHED_FINAL_CHAIN_RANK_1'
+          THEN 1 ELSE 0 END) chain_validated,
+        SUM(CASE WHEN chain_validation_status='TRIGGER_WAS_NOT_FINAL_CHAIN_RANK_1'
+          THEN 1 ELSE 0 END) chain_rejected,
+        SUM(CASE WHEN send_status='DISABLED' THEN 1 ELSE 0 END) send_disabled,
+        SUM(CASE WHEN landing_status='NOT_SENT' THEN 1 ELSE 0 END) not_sent
+      FROM execution_probes WHERE candidate_profile_id=?
+    `).get(candidate.profileId);
+    const excludedHistoricalMints = this.db.prepare(`
+      SELECT COUNT(*) count FROM candidate_excluded_mints WHERE profile_id=?
+    `).get(candidate.profileId)?.count || 0;
+    const gates = [
+      { id: 'NEW_CANDIDATE_EPISODES', actual: episodes, required: candidate.minimumEpisodes,
+        passed: episodes >= candidate.minimumEpisodes },
+      { id: 'NEW_CANDIDATE_MINTS', actual: mints, required: candidate.minimumMints,
+        passed: mints >= candidate.minimumMints },
+      { id: 'TERMINAL_ROWS_PCT', actual: terminalPct, required: 95,
+        passed: (terminalPct || 0) >= 95 },
+      { id: 'NO_EXIT_FULL_LOSS_PROFIT_FACTOR', actual: fullLoss.profitFactor,
+        required: candidate.minimumFullLossProfitFactor,
+        passed: (fullLoss.profitFactor || 0) >= candidate.minimumFullLossProfitFactor },
+    ];
+    return {
+      enabled: true,
+      tradingEnabled: false,
+      profileId: candidate.profileId,
+      cohortStage: candidate.cohortStage,
+      primaryCombination: `${candidate.primaryPositionSol} SOL / ${candidate.primaryExitHorizonMs}ms`,
+      criteria: candidate,
+      episodes,
+      mints,
+      rows: rows.length,
+      terminalRows: terminal.length,
+      terminalRowsPct: terminalPct,
+      primaryClosed: terminal.filter((row) => row.status === 'CLOSED'
+        && row.exitReason === 'PRIMARY').length,
+      rescueClosed: terminal.filter((row) => row.status === 'CLOSED'
+        && row.exitReason !== 'PRIMARY').length,
+      noEntry: terminal.filter((row) => row.status === 'NO_ENTRY').length,
+      noExit: terminal.filter((row) => row.status === 'NO_EXIT').length,
+      excludedHistoricalMints,
+      fullLoss,
+      quickFullLoss,
+      executionProbe: {
+        measured: probes.measured || 0,
+        averageBuildUs: probes.average_build_us,
+        averageSignUs: probes.average_sign_us,
+        averageSerializeUs: probes.average_serialize_us,
+        averageTotalLocalUs: probes.average_total_local_us,
+        averageTriggerToProbeMs: probes.average_trigger_to_probe_ms,
+        chainValidated: probes.chain_validated || 0,
+        chainRejected: probes.chain_rejected || 0,
+        sendDisabled: probes.send_disabled || 0,
+        notSent: probes.not_sent || 0,
+        realLandingSamples: 0,
+        realRankSamples: 0,
+      },
+      gates,
+      status: gates.every((gate) => gate.passed)
+        ? 'READY_FOR_EXECUTION_REVIEW' : 'COLLECT_MORE_DATA',
+      liveTradingDecision: 'TRADING_DISABLED',
     };
   }
 
@@ -1670,6 +1968,7 @@ class ResearchStore {
     const shadowModel = this.config.sameSlotQuoteModel;
     const groups = this.db.prepare(`
       SELECT s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
+        s.candidate_profile_id,s.candidate_cohort_stage,s.candidate_primary,
         s.position_sol,s.exit_horizon_ms,
         AVG(s.trigger_buy_sol) average_trigger_buy_sol,
         AVG(s.trigger_buy_to_dump_pct) average_trigger_buy_to_dump_pct,
@@ -1708,11 +2007,13 @@ class ResearchStore {
         AND COALESCE(s.data_quality_status,'UNASSESSED')<>'QUARANTINED'
         AND (? IS NULL OR s.quote_model=?)
       GROUP BY s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
+        s.candidate_profile_id,s.candidate_cohort_stage,s.candidate_primary,
         s.position_sol,s.exit_horizon_ms
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       this.config.maxReportedRecoveryPct, shadowModel, shadowModel);
     const returns = this.db.prepare(`
       SELECT s.episode_id episodeId,s.quote_model,s.target_rank,s.entry_profile_id,s.cohort_stage,
+        s.candidate_profile_id,s.candidate_cohort_stage,s.candidate_primary,
         s.position_sol,s.exit_horizon_ms,s.modeled_jito_tip_sol,s.net_return_pct,
         s.exit_reason,s.hold_ms
       FROM same_slot_shadow_simulations s
@@ -1729,6 +2030,9 @@ class ResearchStore {
         && row.target_rank === group.target_rank
         && row.entry_profile_id === group.entry_profile_id
         && row.cohort_stage === group.cohort_stage
+        && row.candidate_profile_id === group.candidate_profile_id
+        && row.candidate_cohort_stage === group.candidate_cohort_stage
+        && row.candidate_primary === group.candidate_primary
         && row.position_sol === group.position_sol
         && row.exit_horizon_ms === group.exit_horizon_ms);
       const primaryRows = rows.filter((row) => row.exit_reason === 'PRIMARY');
@@ -1747,6 +2051,9 @@ class ResearchStore {
         targetRank: group.target_rank,
         entryProfileId: group.entry_profile_id,
         cohortStage: group.cohort_stage,
+        candidateProfileId: group.candidate_profile_id,
+        candidateCohortStage: group.candidate_cohort_stage,
+        candidatePrimary: Boolean(group.candidate_primary),
         positionSol: group.position_sol,
         exitHorizonMs: group.exit_horizon_ms,
         averageTriggerBuySol: group.average_trigger_buy_sol,

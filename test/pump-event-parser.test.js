@@ -100,6 +100,59 @@ test('missing transaction index is explicitly not strict', () => {
   assert.equal(events[0].orderingConfidence, 'SLOT_CORRELATED');
 });
 
+test('lightweight logs plus transaction status preserve PumpSwap event values and strict order', async () => {
+  const parser = new PumpEventParser({
+    pumpProgramId: PUMP, pumpAmmProgramId: AMM, wsolMint: WSOL, defaultTokenDecimals: 6,
+  });
+  const events = await parser.parseLogTransaction({
+    slot: 130,
+    transactionIndex: 11,
+    signature: 'lightweight-signature',
+    err: null,
+    logs: [
+      `Program ${AMM} invoke [1]`,
+      `Program data: ${latestBuyEvent().toString('base64')}`,
+      `Program ${AMM} success`,
+    ],
+  }, 1_800_000_000_555, async () => ({
+    mint: 'ResolvedMint', tokenDecimals: 8,
+    tokenDecimalsSource: 'PUMPSWAP_POOL_AND_MINT_ACCOUNTS',
+  }));
+  assert.equal(events.length, 1);
+  assert.equal(events[0].mint, 'ResolvedMint');
+  assert.equal(events[0].tokenDecimals, 8);
+  assert.equal(events[0].transactionIndex, 11);
+  assert.equal(events[0].orderingConfidence, 'STRICT');
+  assert.equal(events[0].ingestionMode, 'LIGHTWEIGHT_LOGS_PLUS_STATUS_V1');
+  assert.equal(events[0].solAmount, 0.992475);
+
+  const full = parser.parseTransaction({
+    slot: 130,
+    index: 11,
+    signature: 'full-signature',
+    meta: {
+      err: null,
+      preTokenBalances: [{ mint: 'ResolvedMint', uiTokenAmount: { decimals: 8 } }],
+      postTokenBalances: [],
+      logMessages: [
+        `Program ${AMM} invoke [1]`,
+        `Program data: ${latestBuyEvent().toString('base64')}`,
+        `Program ${AMM} success`,
+      ],
+    },
+  }, 1_800_000_000_555);
+  for (const field of [
+    'side', 'pool', 'wallet', 'mint', 'tokenDecimals', 'solAmount', 'tokenAmount',
+    'baseAmountRaw', 'userQuoteAmountRaw', 'poolBaseReservesRaw',
+    'poolQuoteReservesRaw', 'virtualQuoteReservesRaw', 'effectiveQuoteReservesRaw',
+    'lpFeeBasisPoints', 'protocolFeeBasisPoints', 'coinCreatorFeeBasisPoints',
+    'buybackFeeBasisPoints', 'totalFeeBps', 'transactionIndex', 'instructionIndex',
+    'eventIndex', 'orderingConfidence',
+  ]) {
+    assert.deepEqual(events[0][field], full[0][field], `lightweight parity: ${field}`);
+  }
+});
+
 test('multi-token transactions resolve decimals from the event base token account', () => {
   const parser = new PumpEventParser({
     pumpProgramId: PUMP, pumpAmmProgramId: AMM, wsolMint: WSOL, defaultTokenDecimals: 6,

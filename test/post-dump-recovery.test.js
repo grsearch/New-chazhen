@@ -12,6 +12,7 @@ class MemoryStore {
     this.confirmations = [];
     this.sameSlotObservations = [];
     this.sameSlotShadows = new Map();
+    this.executionProbes = new Map();
     this.simulations = new Map();
   }
   listToxicWallets() { return []; }
@@ -21,12 +22,62 @@ class MemoryStore {
   insertSameSlotObservation(row) { this.sameSlotObservations.push(row); }
   insertSameSlotShadow(row) { this.sameSlotShadows.set(row.shadowId, { ...row }); }
   updateSameSlotShadow(row) { this.sameSlotShadows.set(row.shadowId, { ...row }); }
+  isCandidateMintExcluded() { return false; }
+  upsertExecutionProbe(row) { this.executionProbes.set(row.probeId, { ...row }); }
   insertConfirmation(row) { this.confirmations.push(row); }
   insertSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
   updateSimulation(row) { this.simulations.set(row.simulationId, { ...row }); }
   upsertToxicWallet() {}
   flush() {}
 }
+
+test('frozen B10-Q500 candidate tags only the 1 SOL / 250ms primary combination', () => {
+  const store = new MemoryStore();
+  const config = configuration().sameSlotShadow;
+  config.positionSizesSol = [1, 2];
+  config.exitHorizonsMs = [100, 250];
+  config.candidate = {
+    enabled: true, profileId: 'R2-B10-Q500-V1', cohortStage: 'HOLDOUT_B10_Q500_V1',
+    minTriggerBuySol: 10, minPostQuoteSol: 500, maxDropPct: 40,
+    primaryPositionSol: 1, primaryExitHorizonMs: 250,
+  };
+  const measured = [];
+  const finalized = [];
+  const simulator = new SameSlotShadowSimulator({
+    config, store, now: () => 2_000,
+    executionProbe: {
+      measure: (row) => measured.push(row),
+      finalize: (row) => finalized.push(row),
+      health: () => ({ enabled: true }),
+    },
+  });
+  const signalTrade = trade({
+    at: 1_000, slot: 10, tx: 1, side: 'SELL', sol: 50, price: 1e-6,
+    wallet: 'seller', quoteSol: 550, sequence: 1,
+  });
+  simulator.startEpisode({
+    episodeId: 'candidate-episode', mint: 'mint', pool: 'pool', slot: 10,
+    detectedAtMs: 1_000, sellSol: 50, postQuoteSol: 550, dropPct: 20, signalTrade,
+  });
+  simulator.observeTrade(trade({
+    at: 1_010, slot: 10, tx: 2, side: 'BUY', sol: 10, price: 1.05e-6,
+    wallet: 'buyer', quoteSol: 560, sequence: 2,
+  }));
+  assert.equal(measured.length, 1, 'local build/sign work runs on the receive hot path');
+  assert.equal(finalized.length, 0, 'chain rank is not claimed before the slot is finalized');
+  simulator.observeTrade(trade({
+    at: 1_100, slot: 11, tx: 1, side: 'BUY', sol: 1, price: 1.06e-6,
+    wallet: 'next', quoteSol: 561, sequence: 3,
+  }));
+  const candidates = [...store.sameSlotShadows.values()]
+    .filter((row) => row.candidateProfileId === 'R2-B10-Q500-V1');
+  assert.equal(candidates.length, 4);
+  assert.equal(candidates.filter((row) => row.candidatePrimary).length, 1);
+  assert.equal(candidates.find((row) => row.candidatePrimary).positionSol, 1);
+  assert.equal(candidates.find((row) => row.candidatePrimary).exitHorizonMs, 250);
+  assert.equal(finalized.length, 1);
+  assert.equal(measured[0].infrastructureExecutable, false);
+});
 
 function configuration() {
   return {

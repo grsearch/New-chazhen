@@ -12,6 +12,7 @@ function storedTrade(signature, receivedAtMs) {
     type: 'ammTrade', signature, eventIndex: 0, receivedAtMs,
     orderingConfidence: 'STRICT', side: 'BUY', market: 'PUMP_AMM',
     mint: 'mint', pool: 'pool', solAmount: 1, tokenAmount: 10,
+    ingestionMode: 'LIGHTWEIGHT_LOGS_PLUS_STATUS_V1',
   };
 }
 
@@ -27,7 +28,7 @@ test('Same-Slot scenarios include NO_EXIT loss and Jito tip sensitivity', () => 
   assert.equal(stats.jitoTipScenarios[0].averageNetReturnPct, 3);
 });
 
-test('schema V10 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
+test('schema V12 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdbr-b5-migration-'));
   const dbPath = path.join(directory, 'research.db');
   context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -62,6 +63,70 @@ test('schema V10 reclassifies pre-existing B5 discovery rows without mixing hold
   store.close();
 });
 
+test('frozen candidate excludes every historical mint and only charges full loss after entry', (context) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdbr-candidate-holdout-'));
+  const dbPath = path.join(directory, 'research.db');
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let store = new ResearchStore({ dbPath, flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,post_quote_sol,updated_at_ms
+    ) VALUES('historical','historical-mint','old-pool',1,'STRICT','[]','EXPIRED',0,10,20,1)
+  `).run();
+  store.close();
+
+  const candidate = {
+    enabled: true, profileId: 'R2-B10-Q500-V1', cohortStage: 'HOLDOUT_B10_Q500_V1',
+    minTriggerBuySol: 10, minPostQuoteSol: 500, maxDropPct: 40,
+    primaryPositionSol: 1, primaryExitHorizonMs: 250,
+    minimumEpisodes: 100, minimumMints: 50, minimumFullLossProfitFactor: 1.3,
+    noExitLossPct: -100, jitoTipSol: 0.01,
+  };
+  store = new ResearchStore({
+    dbPath, flushMs: 60_000, batchMax: 1_000, sameSlotCandidate: candidate,
+  });
+  assert.equal(store.isCandidateMintExcluded(candidate.profileId, 'historical-mint'), true,
+    'the holdout must exclude old mints even when their old event did not meet candidate thresholds');
+  assert.equal(store.isCandidateMintExcluded(candidate.profileId, 'new-mint-1'), false);
+
+  const insertDump = store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,drop_pct,post_quote_sol,updated_at_ms
+    ) VALUES(?,?,?,?,?,'[]','EXPIRED',0,20,600,?)
+  `);
+  insertDump.run('candidate-closed', 'new-mint-1', 'pool-1', 10, 'STRICT', 10);
+  insertDump.run('candidate-no-exit', 'new-mint-2', 'pool-2', 20, 'STRICT', 20);
+  insertDump.run('candidate-no-entry', 'new-mint-3', 'pool-3', 30, 'STRICT', 30);
+  const insertShadow = store.db.prepare(`
+    INSERT INTO same_slot_shadow_simulations(
+      shadow_id,episode_id,target_rank,entry_profile_id,cohort_stage,
+      candidate_profile_id,candidate_cohort_stage,candidate_primary,candidate_novel_mint,
+      position_sol,exit_horizon_ms,quote_model,status,infrastructure_mode,
+      infrastructure_executable,infrastructure_reason,data_quality_status,entry_assumption,
+      entry_reference_rank,entry_at_ms,exit_reason,modeled_jito_tip_sol,net_return_pct,
+      created_at_ms,updated_at_ms
+    ) VALUES(?,?,2,'R2-B5','HOLDOUT_B5_V1',?,?,1,1,1,250,'SHADOW_V2',?,
+      'THEORETICAL_ONLY',0,'TEST','TRUSTED','THEORETICAL',1,?,?,?,?,?,?)
+  `);
+  insertShadow.run('closed', 'candidate-closed', candidate.profileId, candidate.cohortStage,
+    'CLOSED', 10, 'PRIMARY', 0, 202, 10, 11);
+  insertShadow.run('no-exit', 'candidate-no-exit', candidate.profileId, candidate.cohortStage,
+    'NO_EXIT', 20, 'RESCUE_EXHAUSTED', 0, null, 20, 21);
+  insertShadow.run('no-entry', 'candidate-no-entry', candidate.profileId, candidate.cohortStage,
+    'NO_ENTRY', 30, null, 0, null, 30, 31);
+
+  const summary = store.sameSlotCandidateSummary();
+  assert.equal(summary.excludedHistoricalMints, 1);
+  assert.equal(summary.rows, 3);
+  assert.equal(summary.terminalRows, 3);
+  assert.equal(summary.noEntry, 1);
+  assert.equal(summary.fullLoss.samples, 2, 'NO_ENTRY has no position and must not become a loss');
+  assert.ok(Math.abs(summary.fullLoss.profitFactor - (200 / 102)) < 1e-12);
+  store.close();
+});
+
 test('trade rows omit duplicate raw JSON and old event windows are pruned in bounded batches', () => {
   const now = 100_000;
   const store = new ResearchStore({
@@ -80,8 +145,11 @@ test('trade rows omit duplicate raw JSON and old event windows are pruned in bou
   });
   store.flush();
 
-  const raw = store.db.prepare('SELECT raw_json FROM trades WHERE signature = ?').get('current');
+  const raw = store.db.prepare(`
+    SELECT raw_json,ingestion_mode FROM trades WHERE signature = ?
+  `).get('current');
   assert.equal(raw.raw_json, null);
+  assert.equal(raw.ingestion_mode, 'LIGHTWEIGHT_LOGS_PLUS_STATUS_V1');
   assert.deepEqual(store.maintain(now), { prunedTrades: 1, prunedSlotSummaries: 1 });
   assert.equal(store.db.prepare('SELECT COUNT(*) count FROM trades').get().count, 2);
   assert.equal(store.health().storageMode, 'DUMP_EVENT_WINDOWS');

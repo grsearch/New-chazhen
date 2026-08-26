@@ -125,6 +125,25 @@ class RuntimeHealthMonitor {
     else if (now - streamAnchor > this.config.maxEventStaleMs) {
       issues.push(`STREAM_STALE_${Math.max(0, now - streamAnchor)}MS`);
     }
+    const logNotifications = finite(stream.logNotifications, 0);
+    const transactionStatuses = finite(stream.transactionStatuses, 0);
+    const joinRatePct = finite(stream.logStatusJoinRatePct);
+    if (stream.receivesFullTransactionMetadata === false
+      && Math.min(logNotifications, transactionStatuses) >= 100
+      && (joinRatePct == null || joinRatePct < 90)) {
+      issues.push(`LIGHTWEIGHT_JOIN_RATE_LOW_${joinRatePct == null
+        ? 'UNKNOWN' : joinRatePct.toFixed(2)}PCT`);
+    }
+    if (stream.receivesFullTransactionMetadata === false) {
+      const logAnchor = finite(stream.lastLogAtMs, finite(stream.connectedAtMs));
+      const statusAnchor = finite(stream.lastStatusAtMs, finite(stream.connectedAtMs));
+      if (logAnchor != null && now - logAnchor > this.config.maxEventStaleMs) {
+        issues.push(`LOG_STREAM_STALE_${Math.max(0, now - logAnchor)}MS`);
+      }
+      if (statusAnchor != null && now - statusAnchor > this.config.maxEventStaleMs) {
+        issues.push(`STATUS_STREAM_STALE_${Math.max(0, now - statusAnchor)}MS`);
+      }
+    }
 
     const pendingWrites = finite(store.pendingWrites, 0);
     if (pendingWrites > this.config.maxPendingWrites) {

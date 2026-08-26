@@ -514,11 +514,74 @@ class PumpEventParser {
           timestampMs: receivedAtMs,
           programId: row.programId,
           parseVersion: PUMP_PARSE_VERSION,
+          ingestionMode: 'FULL_TRANSACTION_METADATA_V1',
           orderingConfidence: transactionIndex == null ? 'SLOT_CORRELATED' : 'STRICT',
         });
       } catch (_) {
         // Event layouts are append-only. An unknown or malformed event is kept
         // out of the strategy instead of being partially mispriced.
+      }
+    }
+    return events;
+  }
+
+  async parseLogTransaction(message, receivedAtMs = Date.now(), resolvePool = null) {
+    if (!message || message.err || !Array.isArray(message.logs) || !resolvePool) return [];
+    const rows = extractProgramData(message.logs);
+    const events = [];
+    const emptyTokenContexts = {
+      ordered: [], byAccount: new Map(), fallbackDecimals: this.defaultTokenDecimals,
+    };
+    for (let eventIndex = 0; eventIndex < rows.length; eventIndex += 1) {
+      const row = rows[eventIndex];
+      try {
+        const preliminary = decodeEvent(row.data, row.programId, {
+          tokenContexts: emptyTokenContexts,
+          pumpProgramId: this.pumpProgramId,
+          ammProgramId: this.pumpAmmProgramId,
+        });
+        if (!preliminary || preliminary.type !== 'ammTrade' || !preliminary.pool) continue;
+        const token = await resolvePool(preliminary.pool);
+        if (!token?.mint || !Number.isInteger(token.tokenDecimals)) continue;
+        const candidate = {
+          mint: token.mint,
+          decimals: token.tokenDecimals,
+          pre: 0n,
+          post: 0n,
+          accounts: new Set(preliminary.userBaseTokenAccount
+            ? [preliminary.userBaseTokenAccount] : []),
+        };
+        const tokenContexts = {
+          ordered: [candidate],
+          byAccount: new Map([...candidate.accounts].map((account) => [account, candidate])),
+          fallbackDecimals: token.tokenDecimals,
+        };
+        const event = decodeEvent(row.data, row.programId, {
+          tokenContexts,
+          pumpProgramId: this.pumpProgramId,
+          ammProgramId: this.pumpAmmProgramId,
+        });
+        if (!event) continue;
+        events.push({
+          ...event,
+          tokenDecimalsSource: token.tokenDecimalsSource || 'PUMPSWAP_POOL_ACCOUNT',
+          priceReliable: true,
+          signature: message.signature || null,
+          slot: message.slot == null ? null : Number(message.slot),
+          transactionIndex: message.transactionIndex == null
+            ? null : Number(message.transactionIndex),
+          instructionIndex: row.instructionIndex,
+          eventIndex,
+          logIndex: row.logIndex,
+          receivedAtMs,
+          timestampMs: receivedAtMs,
+          programId: row.programId,
+          parseVersion: PUMP_PARSE_VERSION,
+          ingestionMode: 'LIGHTWEIGHT_LOGS_PLUS_STATUS_V1',
+          orderingConfidence: message.transactionIndex == null ? 'SLOT_CORRELATED' : 'STRICT',
+        });
+      } catch (_) {
+        // Unknown append-only event layouts and unresolved pools are excluded.
       }
     }
     return events;

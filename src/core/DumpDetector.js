@@ -135,6 +135,8 @@ class DumpDetector {
           eventIndex: trade.eventIndex ?? null,
           signature: trade.signature || null,
           orderingConfidence: trade.orderingConfidence || 'SLOT_CORRELATED',
+          ingestionMode: trade.ingestionMode || 'UNKNOWN',
+          parseVersion: trade.parseVersion || null,
           matchedDumpProfiles: profiles.map((profile) => profile.id),
           sellSol,
           sellTokens,
