@@ -76,7 +76,7 @@ test('daily export keeps a consistent 24-hour research window', () => {
   });
   assert.equal(result.formatVersion, 2);
   assert.equal(result.integrity, 'ok');
-  assert.equal(result.analysisReadiness.schemaVersion, '12');
+  assert.equal(result.analysisReadiness.schemaVersion, '13');
   assert.deepEqual(result.analysisReadiness.missingColumns, []);
   assert.equal(result.analysisReadiness.status, 'COLLECT_MORE_DATA');
   assert.equal(result.analysisReadiness.liveTradingDecision, 'TRADING_DISABLED');

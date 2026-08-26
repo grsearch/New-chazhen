@@ -50,18 +50,22 @@
 <body>
 <main>
   <header>
-    <div><h1>Same-Slot Dump Backrun / Speed Research</h1><p>首要目标：砸盘后争取同Slot第1/第2笔买入；Post-Dump Recovery仅作为后续Slot对照组。</p></div>
+    <div><h1>Same/Next-Slot Dump Absorption Research</h1><p>宽口径采集、同Slot第1/第2笔理论入场与下一Slot吸收里程碑并行研究。</p></div>
     <div class="badge" id="status">读取中</div>
   </header>
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
   <section class="panel">
-    <div class="panel-head"><h2>核心：R2-B10-Q500-V1 冻结候选组</h2><span class="sort-note">主组合 1 SOL / 250ms · 原R2-B5继续作为对照</span></div>
+    <div class="panel-head"><h2>同 Slot Shadow 组合</h2><span class="sort-note">R2-A1宽口径主研究 · 1 SOL完整退出网格</span></div>
     <div class="table-wrap"><table id="same-slot-shadow"></table></div><div class="pager" id="same-slot-shadow-pager"></div>
   </section>
   <section class="panel">
     <div class="panel-head"><h2>核心：Same-Slot 速度与链上排名（当前仅观察）</h2><span class="sort-note">按观察时间从新到旧</span></div>
     <div class="table-wrap"><table id="same-slot"></table></div><div class="pager" id="same-slot-pager"></div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>观察钱包 PumpSwap 行为</h2><span class="sort-note">复用现有程序流，不增加Helius订阅</span></div>
+    <div class="table-wrap"><table id="watched-wallets"></table></div><div class="pager" id="watched-wallets-pager"></div>
   </section>
   <section class="panel">
     <div class="panel-head"><h2>对照组：后续Slot恢复策略</h2><span class="sort-note">默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
@@ -74,7 +78,7 @@
 </main>
 <script>
 const PAGE_SIZE=20;
-const state={cohortPage:1,shadowPage:1,sameSlotPage:1,dumpPage:1,cohorts:[],shadowCohorts:[]};
+const state={cohortPage:1,shadowPage:1,sameSlotPage:1,walletPage:1,dumpPage:1,cohorts:[],shadowCohorts:[]};
 let refreshVersion=0;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
@@ -113,6 +117,17 @@ const noEntryReasons=r=>{
   if(metric(r.insufficientRoundTripLiquidity)>0)reasons.push(`容量不足 ${r.insufficientRoundTripLiquidity}`);
   if(metric(r.roundTripCostTooHigh)>0)reasons.push(`往返成本过高 ${r.roundTripCostTooHigh}`);
   return reasons.length?reasons.join(' · '):'—';
+};
+const walletLink=wallet=>{
+  const value=String(wallet||'');
+  if(!value)return '—';
+  const label=value.length>14?`${value.slice(0,8)}…${value.slice(-4)}`:value;
+  return `<a class="token-link" href="https://solscan.io/account/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer" title="${html(value)}">${html(label)} ↗</a>`;
+};
+const txLink=signature=>{
+  const value=String(signature||'');
+  if(!value)return '—';
+  return `<a class="token-link" href="https://solscan.io/tx/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer">查看 ↗</a>`;
 };
 const scenario=(rows,key,value)=>{
   const row=(rows||[]).find(item=>Number(item[key])===Number(value));
@@ -165,15 +180,15 @@ function renderShadowCohorts(){
     const rescue100=combinedScenario(r.combinedScenarios,-100,0.01);
     const rescue=`5s ${r.rescue5sFilled||0} · 10s ${r.rescue10sFilled||0}`;
     const primaryHold=r.primaryHoldP50Ms==null?'—':`${fmt(r.primaryHoldP50Ms,0)}/${fmt(r.primaryHoldP95Ms,0)}ms`;
-    return `<tr class="${r.candidateProfileId||profile==='R2-B5'?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${r.candidatePrimary?'<span class="sample">冻结主组合</span>':sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(fmt(r.averageTriggerBuySol,2))}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.primaryExitFillRatePct))}${cell(primaryHold)}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(rescue)}${cell(r.rescueUnresolved||0,metric(r.rescueUnresolved)>0?'bad':'')}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(quick15),metric(quick15)>0?'good':'bad')}${cell(pct(rescue15),metric(rescue15)>0?'good':'bad')}${cell(pct(rescue100),metric(rescue100)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
+    return `<tr class="${profile==='R2-A1'?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(fmt(r.averageTriggerBuySol,2))}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.primaryExitFillRatePct))}${cell(primaryHold)}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(rescue)}${cell(r.rescueUnresolved||0,metric(r.rescueUnresolved)>0?'bad':'')}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(quick15),metric(quick15)>0?'good':'bad')}${cell(pct(rescue15),metric(rescue15)>0?'good':'bad')}${cell(pct(rescue100),metric(rescue100)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
   }).join(''):'<tr><td class="empty" colspan="21">暂无 Same-Slot Shadow 数据</td></tr>';
   document.querySelector('#same-slot-shadow').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>首买SOL</th><th>理论Entry</th><th>NO_ENTRY原因</th><th>主Exit</th><th>主退出持有 P50/P95</th><th>含救援Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>应急Exit</th><th>应急未解</th><th>胜率</th><th>CLOSED均值</th><th>主窗口失败=-15% + Jito 0.01</th><th>含救援NO_EXIT=-15% + Jito 0.01</th><th>含救援NO_EXIT=-100% + Jito 0.01</th><th>PF</th><th>最差5%</th><th>可执行性</th></tr>'+body;
   pager('#same-slot-shadow-pager','shadow',state.shadowPage,totalPages,rows.length);
 }
 function renderDumps(result){
   state.dumpPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(pricePct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无砸盘事件</td></tr>';
-  document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+body;
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(fmt(r.absorption_score,1),metric(r.absorption_score)>=60?'good':'')}${cell(pricePct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="9">暂无砸盘事件</td></tr>';
+  document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>吸收评分</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+body;
   pager('#dump-pager','dump',result.page,result.totalPages,result.total);
 }
 function renderSameSlot(result){
@@ -181,6 +196,12 @@ function renderSameSlot(result){
   const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.observed_at_ms))} · ${mintLink(r.mint)}</td>${cell(r.classification)}${cell(r.post_dump_buy_rank?`#${r.post_dump_buy_rank}`:'—')}${cell(`${r.dump_transaction_index??'?'}→${r.buy_transaction_index??'?'}`)}${cell(fmt(r.buy_sol,3))}${cell(`${r.receive_lag_ms}ms`)}${cell(pricePct(r.price_bounce_pct))}${cell(r.data_quality_status||'UNASSESSED')}${cell('否','bad')}${cell(r.rejection_reason)}</tr>`).join(''):'<tr><td class="empty" colspan="10">暂无 Same-Slot 观察</td></tr>';
   document.querySelector('#same-slot').innerHTML='<tr><th>时间 / 合约地址</th><th>分类</th><th>观测排名</th><th>链上Tx位置</th><th>买入 SOL</th><th>接收延迟</th><th>价格反弹</th><th>数据质量</th><th>本系统可执行</th><th>原因</th></tr>'+body;
   pager('#same-slot-pager','sameSlot',result.page,result.totalPages,result.total);
+}
+function renderWatchedWallets(result){
+  state.walletPage=result.page;
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.received_at_ms))} · ${walletLink(r.wallet)}</td><td>${mintLink(r.mint)}</td>${cell(r.side,r.side==='BUY'?'good':'bad')}${cell(fmt(r.sol_amount,3))}${cell(r.slot??'—')}${cell(`${r.transaction_index??'?'}→${r.instruction_index??'?'}`)}<td>${txLink(r.signature)}</td></tr>`).join(''):'<tr><td class="empty" colspan="7">尚未观察到该钱包的PumpSwap成交</td></tr>';
+  document.querySelector('#watched-wallets').innerHTML='<tr><th>时间 / 钱包</th><th>合约地址</th><th>方向</th><th>SOL</th><th>Slot</th><th>Tx→Ix</th><th>交易</th></tr>'+body;
+  pager('#watched-wallets-pager','wallet',result.page,result.totalPages,result.total);
 }
 function changePage(kind,page){
   if(kind==='cohort'){
@@ -198,30 +219,36 @@ function changePage(kind,page){
     refresh();
     return;
   }
+  if(kind==='wallet'){
+    state.walletPage=page;
+    refresh();
+    return;
+  }
   state.dumpPage=page;
   refresh();
 }
 async function refresh(){
   const version=++refreshVersion;
   try{
-    const [summary,dumpPage,sameSlotPage,health]=await Promise.all([
+    const [summary,dumpPage,sameSlotPage,walletPage,health]=await Promise.all([
       fetch('/api/summary').then(r=>r.json()),fetch(`/api/dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),
-      fetch(`/api/same-slot?page=${state.sameSlotPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),fetch('/api/health').then(r=>r.json())
+      fetch(`/api/same-slot?page=${state.sameSlotPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),fetch(`/api/watched-wallets?page=${state.walletPage}&pageSize=${PAGE_SIZE}`).then(r=>r.json()),fetch('/api/health').then(r=>r.json())
     ]);
     if(version!==refreshVersion)return;
     document.querySelector('#status').textContent=`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}`;
-    const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution,c=summary.sameSlotCandidate||{},hs=health.stream||{},pr=health.poolResolver||{};
-    const cards=[['Helius采集',hs.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],['日志/排序合并率',hs.logStatusJoinRatePct==null?'—':pct(hs.logStatusJoinRatePct)],['待合并消息',hs.pendingLogStatusJoins??0],['新池RPC补全',pr.rpcCalls??0],['冻结候选状态',c.status||'COLLECT_MORE_DATA'],['候选新事件',`${c.episodes||0} / ${c.criteria?.minimumEpisodes||100}`],['候选新币',`${c.mints||0} / ${c.criteria?.minimumMints||50}`],['全损PF',fmt(c.fullLoss?.profitFactor)],['快速全损PF',fmt(c.quickFullLoss?.profitFactor)],['本地测速样本',c.executionProbe?.measured||0],['链上首买校验',`${c.executionProbe?.chainValidated||0} / ${c.executionProbe?.chainRejected||0}`],['触发→本地测速',c.executionProbe?.averageTriggerToProbeMs==null?'—':`${fmt(c.executionProbe.averageTriggerToProbeMs,2)}ms`],['构建/签名均值',c.executionProbe?.averageBuildUs==null?'—':`${fmt(c.executionProbe.averageBuildUs,0)}/${fmt(c.executionProbe.averageSignUs,0)}μs`],['真实落地/排名样本','0 / 0'],['R2-B5验证事件',sh.primaryProfileEpisodes],['R2-B5独立币',sh.primaryProfileMints],['B5 >23ms/全部事件',pct(sh.primaryPositiveHeadroomPctOfEpisodes)],['B5事件含5s救援',sh.primaryRescue5sEpisodes],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2买单间隔P50',s.rank2InterBuyGapP50Ms==null?'—':`${fmt(s.rank2InterBuyGapP50Ms,0)}ms`],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['观测异常已隔离',s.dataQualityQuarantined||0],['独立砸盘事件',d.independent]];
+    const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution,w=summary.walletResearch||{},hs=health.stream||{},pr=health.poolResolver||{};
+    const cards=[['Helius采集',hs.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],['日志/排序合并率',hs.logStatusJoinRatePct==null?'—':pct(hs.logStatusJoinRatePct)],['待合并消息',hs.pendingLogStatusJoins??0],['新池RPC补全',pr.rpcCalls??0],['独立砸盘事件',d.independent],['平均吸收评分',fmt(d.averageAbsorptionScore,1)],['下一Slot确认事件',d.recoveredEpisodes],['同Slot买入事件',s.eventsWithStrictBuy],['R2-A1研究事件',sh.primaryProfileEpisodes],['R2-A1独立币',sh.primaryProfileMints],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2买单间隔P50',s.rank2InterBuyGapP50Ms==null?'—':`${fmt(s.rank2InterBuyGapP50Ms,0)}ms`],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['观察钱包成交',w.observations||0],['钱包涉及币种',w.mints||0],['钱包同Slot回补',w.sameSlotPostDumpBuys||0],['钱包下一Slot回补',w.nextSlotPostDumpBuys||0],['观测异常已隔离',s.dataQualityQuarantined||0],['真实落地/排名样本','0 / 0']];
     document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
     const notices=[];
     if(hs.receivesFullTransactionMetadata===false)notices.push(`<strong>Helius轻量模式：</strong>只接收PumpSwap日志与交易排序状态，不接收完整交易元数据；已合并 ${hs.joinedLightweightTransactions||0} 笔，应用层负载估算 ${fmt(hs.approximatePayloadMegabytes,1)} MB，池/Mint按需查询 ${pr.rpcCalls||0} 次`);
     if(hs.receivesFullTransactionMetadata===false&&metric(hs.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(hs.logStatusJoinRatePct)}；部署初期可短暂偏低，持续低于95%时不要用该窗口判断实盘</span>`);
     notices.push('<strong>Shadow口径：</strong>Rank#1/#2均为理论入场，使用之后第一笔严格因果公开储备作为退出报价；程序不读取实盘私钥、不发送交易，本地探针只用临时Keypair计时');
     notices.push('<strong>速度口径：</strong>Rank#2余量按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算；仍不包含Leader排队与真实落地时间');
-    notices.push('<strong>R2-B5：</strong>第一笔严格同Slot买单≥5 SOL；旧数据标记为发现样本，新数据单独进入HOLDOUT_B5_V1验证组，R2-B2继续作为对照');
-    notices.push('<strong>冻结候选：</strong>R2-B10-Q500-V1要求首买≥10 SOL、卖后Quote≥500 SOL、跌幅≤40%；数据库中全部历史Mint会一次性排除，主组合固定1 SOL/250ms');
+    notices.push('<strong>宽口径：</strong>跌幅5%–40%、Sell/Reserve≥2%、卖后Quote≥20 SOL即进入研究；R2-A1按首买≥max(0.1 SOL,砸盘额1%)标记');
+    notices.push('<strong>下一Slot：</strong>N1-FB、N1-A5、N1-P2、N1-B2分别记录首个有效买入、吸收5%、反弹2%和两个独立买家的因果入场时点；这些是研究里程碑，不是实盘信号');
+    notices.push(`<strong>观察钱包：</strong>已记录 ${w.observations||0} 笔PumpSwap成交，其中砸盘窗口附近 ${w.aroundDumpTrades||0} 笔；复用当前PumpSwap数据流，不增加单独Helius订阅`);
     notices.push('<strong>执行测速：</strong>仅测量隔离临时签名器的本地构建、签名和序列化；交易发送硬关闭，因此发送、落地和真实排名必须显示未发送/0样本，禁止用理论值代替');
-    notices.push('<strong>退出分层：</strong>“主Exit”只统计100/250/500ms目标在2秒宽限内完成的退出；5秒/10秒救援单独列示，最终仍无报价才计NO_EXIT');
+    notices.push('<strong>退出分层：</strong>1 SOL测试250/500/1000/2000ms，2/5 SOL只测试250/500ms容量敏感性；5秒/10秒救援单独列示，最终仍无报价才计NO_EXIT');
     notices.push('<strong>情景收益：</strong>“主窗口失败”把救援退出也按失败处理；“含救援”保留救援实际收益。两者都计Jito 0.01 SOL（买卖各一笔）');
     if(metric(d.excludedLegacyPriceEvents)>0)notices.push(`<strong>${d.excludedLegacyPriceEvents}</strong> 个旧价格解析事件已隔离，不参与任何策略统计`);
     if(metric(d.excludedOverMaxDropEvents)>0)notices.push(`<strong>${d.excludedOverMaxDropEvents}</strong> 个跌幅超过40%的RUG候选已排除`);
@@ -240,6 +267,7 @@ async function refresh(){
     renderShadowCohorts();
     renderCohorts();
     renderSameSlot(sameSlotPage);
+    renderWatchedWallets(walletPage);
     renderDumps(dumpPage);
   }catch(e){if(version===refreshVersion)document.querySelector('#status').textContent=`读取失败: ${e.message}`}
 }

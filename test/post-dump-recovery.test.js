@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PostDumpRecoveryEngine } = require('../src/core/PostDumpRecoveryEngine');
 const { SameSlotShadowSimulator } = require('../src/core/SameSlotShadowSimulator');
+const { ExecutionSimulator } = require('../src/core/ExecutionSimulator');
+const { config: productionConfig } = require('../src/config');
 
 class MemoryStore {
   constructor() {
@@ -14,9 +16,11 @@ class MemoryStore {
     this.sameSlotShadows = new Map();
     this.executionProbes = new Map();
     this.simulations = new Map();
+    this.watchedWalletTrades = [];
   }
   listToxicWallets() { return []; }
   recordTrade(row) { this.trades.push(row); }
+  recordWatchedWalletTrade(row) { this.watchedWalletTrades.push(row); }
   insertDump(dump, toxic) { this.dumps.push({ dump, toxic }); }
   updateDump() {}
   insertSameSlotObservation(row) { this.sameSlotObservations.push(row); }
@@ -30,6 +34,93 @@ class MemoryStore {
   upsertToxicWallet() {}
   flush() {}
 }
+
+test('broad research intake keeps 5-40 percent dumps with two percent reserve pressure', () => {
+  const base = 1_800_000_100_000;
+  const store = new MemoryStore();
+  const config = configuration();
+  config.dump.profiles = [{
+    id: 'D2-P5-Q20-RESEARCH', minSellToQuotePct: 2, minDropPct: 5,
+    minPostQuoteSol: 20, minPoolAgeMs: 0,
+  }];
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => base });
+  engine.observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 901,
+  }));
+  const result = engine.observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 3,
+    price: 9.2e-8, wallet: 'seller', quoteSol: 92, sequence: 902,
+  }));
+  assert.ok(result.dump);
+  assert.deepEqual(result.dump.matchedDumpProfiles, ['D2-P5-Q20-RESEARCH']);
+});
+
+test('N+1 research milestone stores a causal absorption score', () => {
+  const base = 1_800_000_200_000;
+  let now = base;
+  const store = new MemoryStore();
+  const config = configuration();
+  config.recovery.profiles = [{
+    id: 'N1-FB', researchOnly: true, allowToxicResearch: true,
+    minSlotDelta: 1, maxSlotDelta: 1, minPriceBouncePct: 0,
+    minDropRecoveryPct: 0, minUniqueBuyers: 1, minBuySol: 0.1,
+    minBuyToDumpPct: 1, requirePositiveNetFlow: false,
+  }];
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => now });
+  const observe = (row) => { now = row.receivedAtMs; return engine.observe(row); };
+  observe(trade({
+    at: base - 100, slot: 1, tx: 1, side: 'BUY', sol: 0.1,
+    price: 1e-7, wallet: 'prior', quoteSol: 100, sequence: 911,
+  }));
+  observe(trade({
+    at: base, slot: 2, tx: 1, side: 'SELL', sol: 20,
+    price: 7e-8, wallet: 'seller', quoteSol: 70, sequence: 912,
+  }));
+  observe(trade({
+    at: base + 100, slot: 3, tx: 1, side: 'BUY', sol: 0.3,
+    price: 7.2e-8, wallet: 'buyer', quoteSol: 70.3, sequence: 913,
+  }));
+  assert.equal(store.confirmations.length, 1);
+  assert.equal(store.confirmations[0].profileId, 'N1-FB');
+  assert.ok(store.confirmations[0].snapshot.absorptionScore > 0);
+  assert.ok(Number.isFinite(
+    store.confirmations[0].snapshot.absorptionScoreComponents.capitalAbsorption,
+  ));
+});
+
+test('watched wallet research reuses PumpSwap events without another stream', () => {
+  const base = 1_800_000_300_000;
+  const wallet = 'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz';
+  const store = new MemoryStore();
+  const config = configuration();
+  config.walletResearch = { enabled: true, wallets: new Set([wallet]) };
+  const engine = new PostDumpRecoveryEngine({ config, store, now: () => base });
+  engine.observe(trade({
+    at: base, slot: 1, tx: 1, side: 'BUY', sol: 1,
+    price: 1e-7, wallet, quoteSol: 100, sequence: 921,
+  }));
+  engine.observe(trade({
+    at: base + 10, slot: 1, tx: 2, side: 'BUY', sol: 1,
+    price: 1e-7, wallet: 'other', quoteSol: 101, sequence: 922,
+  }));
+  assert.equal(store.watchedWalletTrades.length, 1);
+  assert.equal(engine.health().watchedWalletTrades, 1);
+});
+
+test('production N+1 grid avoids a full Cartesian simulation explosion', () => {
+  const store = new MemoryStore();
+  const simulator = new ExecutionSimulator({ config: productionConfig.execution, store });
+  const created = simulator.schedule({
+    confirmationId: 'grid:N1-FB', episodeId: 'grid', profileId: 'N1-FB',
+    confirmedAtMs: Date.now(), slot: 10, snapshot: { slotDelta: 1 },
+    dump: { pool: 'pool', mint: 'mint' },
+  });
+  assert.equal(created.length, 16);
+  assert.equal(created.filter((row) => row.positionSol === 1).length, 12);
+  assert.equal(created.filter((row) => row.positionSol === 2).length, 2);
+  assert.equal(created.filter((row) => row.positionSol === 5).length, 2);
+});
 
 test('frozen B10-Q500 candidate tags only the 1 SOL / 250ms primary combination', () => {
   const store = new MemoryStore();
@@ -188,8 +279,8 @@ test('strategy waits for next-slot multi-wallet recovery and delayed executable 
   const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
   assert.equal(rank2.status, 'CLOSED');
   assert.equal(rank2.exitHorizonMs, 100);
-  assert.equal(rank2.entryProfileId, 'R2-B5');
-  assert.equal(rank2.cohortStage, 'HOLDOUT_B5_V1');
+  assert.equal(rank2.entryProfileId, 'R2-A5');
+  assert.equal(rank2.cohortStage, 'BROAD_RESEARCH_V1');
   assert.equal(rank2.triggerBuySol, 10);
   assert.equal(store.sameSlotObservations.length, 1, 'next-slot buys are not probe observations');
   observe(trade({ at: base + 250, slot: 502, tx: 2, side: 'BUY', sol: 1.6, price: 7.7e-8, wallet: 'buyer-b', quoteSol: 77, sequence: 5 }));
@@ -304,7 +395,7 @@ test('Same-Slot Shadow assigns rank from chain order instead of receive order', 
   assert.equal(rank1.competitorHeadroomMs, 37);
 });
 
-test('R2-B5 fast exits fall back to the 5 second rescue quote before NO_EXIT', () => {
+test('R2-A5 fast exits fall back to the 5 second rescue quote before NO_EXIT', () => {
   const base = 1_800_047_500_000;
   let now = base;
   const config = configuration();
@@ -331,7 +422,7 @@ test('R2-B5 fast exits fall back to the 5 second rescue quote before NO_EXIT', (
   }));
 
   let rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
-  assert.equal(rank2.entryProfileId, 'R2-B5');
+  assert.equal(rank2.entryProfileId, 'R2-A5');
   assert.equal(rank2.status, 'PENDING_EXIT');
   now = base + 2_700;
   engine.advanceTime(now);
@@ -406,7 +497,7 @@ test('Same-Slot Shadow quarantines discontinuous reserve data from strategy retu
   }));
 
   const rank2 = [...store.sameSlotShadows.values()].find((row) => row.targetRank === 2);
-  assert.equal(rank2.entryProfileId, 'R2-B2');
+  assert.equal(rank2.entryProfileId, 'R2-A5');
   assert.equal(rank2.status, 'NO_ENTRY');
   assert.equal(rank2.rejectionReason, 'DATA_QUALITY_REJECTED_ENTRY');
   assert.equal(rank2.dataQualityStatus, 'QUARANTINED');

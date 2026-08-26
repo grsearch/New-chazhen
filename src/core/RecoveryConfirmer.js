@@ -13,6 +13,14 @@ function pct(part, whole) {
   return whole > 0 ? part / whole * 100 : null;
 }
 
+function clamp(value, min = 0, max = 1) {
+  return Math.min(max, Math.max(min, finite(value, min)));
+}
+
+function rounded(value) {
+  return Math.round(value * 100) / 100;
+}
+
 class RecoveryConfirmer {
   constructor({ config, toxicFilter, now = () => Date.now() }) {
     this.config = config;
@@ -146,11 +154,15 @@ class RecoveryConfirmer {
       state.lastSnapshot = snapshot;
       updates.push(snapshot);
 
-      if (state.eligible && !state.secondDump) {
+      if (!state.secondDump) {
         for (const profile of this.config.profiles) {
+          const profileEligible = state.eligible
+            || (profile.researchOnly && profile.allowToxicResearch);
+          if (!profileEligible) continue;
           if (state.confirmedProfiles.has(profile.id) || !this._profileMet(profile, snapshot)) continue;
           state.confirmedProfiles.add(profile.id);
-          state.status = 'CONFIRMED';
+          state.status = state.toxicDecision.rejected
+            ? 'TOXIC_RESEARCH_CONFIRMED' : 'CONFIRMED';
           confirmations.push({
             confirmationId: `${episodeId}:${profile.id}`,
             episodeId,
@@ -162,6 +174,7 @@ class RecoveryConfirmer {
             eventIndex: trade.eventIndex ?? null,
             signature: trade.signature || null,
             orderingConfidence: trade.orderingConfidence || 'SLOT_CORRELATED',
+            researchOnly: Boolean(profile.researchOnly),
             dump: state.dump,
             snapshot,
           });
@@ -188,12 +201,17 @@ class RecoveryConfirmer {
   }
 
   _profileMet(profile, snapshot) {
-    if (!(snapshot.slotDelta > 0) || snapshot.slotDelta > profile.maxSlotDelta) return false;
-    if (snapshot.priceBouncePct < profile.minPriceBouncePct) return false;
-    if (snapshot.dropRecoveryPct < profile.minDropRecoveryPct) return false;
-    if (snapshot.uniqueBuyers < profile.minUniqueBuyers) return false;
-    if (snapshot.validBuySol < profile.minBuySol) return false;
-    if (snapshot.buyToDumpPct < profile.minBuyToDumpPct) return false;
+    const minSlotDelta = finite(profile.minSlotDelta, 1);
+    if (!(snapshot.slotDelta >= minSlotDelta)
+      || snapshot.slotDelta > finite(profile.maxSlotDelta, Infinity)) return false;
+    if (finite(snapshot.priceBouncePct, -Infinity)
+      < finite(profile.minPriceBouncePct, 0)) return false;
+    if (finite(snapshot.dropRecoveryPct, -Infinity)
+      < finite(profile.minDropRecoveryPct, 0)) return false;
+    if (snapshot.uniqueBuyers < finite(profile.minUniqueBuyers, 0)) return false;
+    if (snapshot.validBuySol < finite(profile.minBuySol, 0)) return false;
+    if (finite(snapshot.buyToDumpPct, 0) < finite(profile.minBuyToDumpPct, 0)) return false;
+    if (finite(snapshot.absorptionScore, 0) < finite(profile.minAbsorptionScore, 0)) return false;
     if (profile.requirePositiveNetFlow && !(snapshot.netFlowSol > 0)) return false;
     if (profile.minPoolAgeMs && snapshot.poolAgeMs < profile.minPoolAgeMs) return false;
     if (profile.minPostQuoteSol && snapshot.postQuoteSol < profile.minPostQuoteSol) return false;
@@ -221,6 +239,28 @@ class RecoveryConfirmer {
     const netFlowAt = (windowMs) => state.flowEvents
       .filter((row) => row.at >= at - windowMs)
       .reduce((sum, row) => sum + row.amount, 0);
+    const quoteRetentionPct = pct(state.currentQuoteSol, state.dump.postQuoteSol);
+    const buyToDumpPct = pct(state.validBuySol, state.dump.sellSol);
+    const netFlowSol = state.validBuySol - state.followSellSol;
+    const scoreComponents = {
+      capitalAbsorption: 30 * clamp(finite(buyToDumpPct, 0) / 20),
+      priceResponse: 20 * clamp(finite(priceBouncePct, 0) / 6),
+      buyerDiversity: 15 * clamp(state.uniqueBuyers.size / 3),
+      quoteRetention: 15 * clamp((finite(quoteRetentionPct, 0) - 80) / 20),
+      positiveNetFlow: 10 * clamp(state.validBuySol > 0 ? netFlowSol / state.validBuySol : 0),
+      noSecondDump: state.secondDump ? 0 : 10,
+      toxicPenalty: state.toxicDecision.rejected ? -35 : 0,
+      followSellPenalty: -15 * clamp(
+        finite(state.followSellSol, 0) / Math.max(finite(state.dump.sellSol, 0), 0.000001),
+      ),
+    };
+    for (const [key, component] of Object.entries(scoreComponents)) {
+      scoreComponents[key] = rounded(component);
+    }
+    const absorptionScore = rounded(clamp(
+      Object.values(scoreComponents).reduce((sum, component) => sum + component, 0),
+      0, 100,
+    ));
     return {
       episodeId: state.dump.episodeId,
       status: state.status,
@@ -234,16 +274,19 @@ class RecoveryConfirmer {
       maxRecoveryPct: state.maxRecoveryPct,
       postQuoteSol: state.dump.postQuoteSol,
       currentQuoteSol: state.currentQuoteSol,
-      quoteRetentionPct: pct(state.currentQuoteSol, state.dump.postQuoteSol),
+      quoteRetentionPct,
       poolAgeMs: state.dump.poolAgeMs + Math.max(0, at - state.dump.detectedAtMs),
       rawBuySol: state.rawBuySol,
       validBuySol: state.validBuySol,
       followSellSol: state.followSellSol,
-      netFlowSol: state.validBuySol - state.followSellSol,
+      netFlowSol,
       netFlow1sSol: netFlowAt(1_000),
       netFlow3sSol: netFlowAt(3_000),
       uniqueBuyers: state.uniqueBuyers.size,
-      buyToDumpPct: pct(state.validBuySol, state.dump.sellSol),
+      buyToDumpPct,
+      absorptionScore,
+      absorptionScoreComponents: scoreComponents,
+      toxicAtSignal: Boolean(state.toxicDecision.rejected),
       lastNewBuyerAtMs: state.lastNewBuyerAtMs,
       buyerStalled: state.lastNewBuyerAtMs != null
         && at - state.lastNewBuyerAtMs >= this.config.buyerStallMs,

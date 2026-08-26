@@ -66,6 +66,12 @@ class DashboardServer {
       if (url.pathname === '/api/simulations') {
         return sendJson(response, 200, this.store.recentSimulations(limit));
       }
+      if (url.pathname === '/api/watched-wallets') {
+        return sendJson(response, 200, this.store.recentWatchedWalletTradesPage(
+          Number(url.searchParams.get('page') || 1),
+          Number(url.searchParams.get('pageSize') || 20),
+        ));
+      }
       if (url.pathname === '/api/same-slot') {
         if (url.searchParams.has('page') || url.searchParams.has('pageSize')) {
           return sendJson(response, 200, this.store.recentSameSlotObservationsPage(

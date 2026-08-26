@@ -40,6 +40,7 @@ class ExecutionSimulator {
     for (const entry of this.config.entryVariants) {
       for (const positionSol of this.config.positionSizesSol) {
         for (const exit of this.config.exitProfiles) {
+          if (!this._combinationAllowed(entry.id, positionSol, exit.id)) continue;
           const simulationId = [
             confirmation.confirmationId,
             entry.id,
@@ -231,6 +232,14 @@ class ExecutionSimulator {
       return finite(trade.slot, -Infinity) > finite(simulation.confirmationSlot, Infinity);
     }
     return at >= simulation.requestedEntryAtMs;
+  }
+
+  _combinationAllowed(entryVariantId, positionSol, exitProfileId) {
+    const grid = this.config.combinationGrid;
+    if (!Array.isArray(grid) || !grid.length) return true;
+    return grid.some((row) => Number(row.positionSol) === Number(positionSol)
+      && row.entryVariantIds?.includes(entryVariantId)
+      && row.exitProfileIds?.includes(exitProfileId));
   }
 
   _exitReason(simulation, recovery, netReturnPct, at) {

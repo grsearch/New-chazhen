@@ -28,6 +28,40 @@ test('Same-Slot scenarios include NO_EXIT loss and Jito tip sensitivity', () => 
   assert.equal(stats.jitoTipScenarios[0].averageNetReturnPct, 3);
 });
 
+test('schema V13 stores watched wallet trades and absorption scores', () => {
+  const store = new ResearchStore({ dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000 });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,slot,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,updated_at_ms
+    ) VALUES('episode','mint','pool',1000,10,'STRICT','[]','OBSERVING',0,1000)
+  `).run();
+  store.updateDump({
+    episodeId: 'episode', status: 'OBSERVING', observedAtMs: 1100,
+    absorptionScore: 62.5,
+    absorptionScoreComponents: { capitalAbsorption: 20, priceResponse: 10 },
+  });
+  store.recordWatchedWalletTrade({
+    type: 'ammTrade', wallet: 'watched', signature: 'watched-signature', eventIndex: 0,
+    receivedAtMs: 1050, slot: 10, transactionIndex: 2, instructionIndex: 1,
+    orderingConfidence: 'STRICT', mint: 'mint', pool: 'pool', side: 'BUY',
+    solAmount: 1, tokenAmount: 10, price: 1, reservePrice: 1,
+    ingestionMode: 'LIGHTWEIGHT_LOGS_PLUS_STATUS_V1',
+  });
+  store.flush();
+
+  assert.equal(store.db.prepare(
+    "SELECT value FROM schema_meta WHERE key='schema_version'",
+  ).get().value, '13');
+  assert.deepEqual(store.db.prepare(`
+    SELECT absorption_score FROM dump_events WHERE episode_id='episode'
+  `).get(), { absorption_score: 62.5 });
+  const summary = store.summary();
+  assert.equal(summary.walletResearch.observations, 1);
+  assert.equal(summary.walletResearch.sameSlotPostDumpBuys, 1);
+  store.close();
+});
+
 test('schema V12 reclassifies pre-existing B5 discovery rows without mixing holdout data', (context) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sdbr-b5-migration-'));
   const dbPath = path.join(directory, 'research.db');

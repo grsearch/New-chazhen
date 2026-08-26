@@ -219,7 +219,7 @@ class ResearchStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '12')
+      INSERT INTO schema_meta(key, value) VALUES ('schema_version', '13')
       ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 
       CREATE TABLE IF NOT EXISTS trades (
@@ -322,6 +322,8 @@ class ResearchStore {
         buy_to_dump_pct REAL,
         price_bounce_pct REAL,
         max_recovery_pct REAL DEFAULT 0,
+        absorption_score REAL,
+        absorption_score_components_json TEXT,
         current_quote_sol REAL,
         quote_retention_pct REAL,
         strict_same_slot_buys INTEGER DEFAULT 0,
@@ -361,9 +363,36 @@ class ResearchStore {
         net_flow_1s_sol REAL,
         net_flow_3s_sol REAL,
         current_quote_sol REAL,
+        absorption_score REAL,
+        absorption_score_components_json TEXT,
         snapshot_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_confirmations_time ON confirmations(confirmed_at_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS watched_wallet_trades (
+        observation_id TEXT PRIMARY KEY,
+        wallet TEXT NOT NULL,
+        received_at_ms INTEGER NOT NULL,
+        chain_timestamp_ms INTEGER,
+        slot INTEGER,
+        transaction_index INTEGER,
+        instruction_index INTEGER,
+        event_index INTEGER NOT NULL,
+        signature TEXT NOT NULL,
+        ordering_confidence TEXT NOT NULL,
+        mint TEXT,
+        pool TEXT,
+        side TEXT NOT NULL,
+        sol_amount REAL,
+        token_amount REAL,
+        price REAL,
+        reserve_price REAL,
+        ingestion_mode TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_watched_wallet_time
+        ON watched_wallet_trades(wallet,received_at_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_watched_wallet_mint_time
+        ON watched_wallet_trades(mint,received_at_ms DESC);
 
       CREATE TABLE IF NOT EXISTS same_slot_observations (
         observation_id TEXT PRIMARY KEY,
@@ -581,6 +610,10 @@ class ResearchStore {
     this._ensureColumn('dump_events', 'parse_version', 'TEXT');
     this._ensureColumn('trades', 'ingestion_mode', 'TEXT');
     this._ensureColumn('dump_events', 'ingestion_mode', 'TEXT');
+    this._ensureColumn('dump_events', 'absorption_score', 'REAL');
+    this._ensureColumn('dump_events', 'absorption_score_components_json', 'TEXT');
+    this._ensureColumn('confirmations', 'absorption_score', 'REAL');
+    this._ensureColumn('confirmations', 'absorption_score_components_json', 'TEXT');
     this._ensureColumn('same_slot_observations', 'data_quality_status',
       "TEXT NOT NULL DEFAULT 'UNASSESSED'");
     this._ensureColumn('same_slot_observations', 'data_quality_reasons_json', 'TEXT');
@@ -754,6 +787,17 @@ class ResearchStore {
           transaction_index_coverage_pct=excluded.transaction_index_coverage_pct,
           strict_ordering_available=excluded.strict_ordering_available
       `),
+      watchedWalletTrade: this.db.prepare(`
+        INSERT OR IGNORE INTO watched_wallet_trades (
+          observation_id,wallet,received_at_ms,chain_timestamp_ms,slot,transaction_index,
+          instruction_index,event_index,signature,ordering_confidence,mint,pool,side,
+          sol_amount,token_amount,price,reserve_price,ingestion_mode
+        ) VALUES (
+          @observationId,@wallet,@receivedAtMs,@chainTimestampMs,@slot,@transactionIndex,
+          @instructionIndex,@eventIndex,@signature,@orderingConfidence,@mint,@pool,@side,
+          @solAmount,@tokenAmount,@price,@reservePrice,@ingestionMode
+        )
+      `),
       dump: this.db.prepare(`
         INSERT OR IGNORE INTO dump_events (
           episode_id,mint,pool,seller,coin_creator,detected_at_ms,chain_timestamp_ms,slot,
@@ -781,7 +825,9 @@ class ResearchStore {
           status=@status, valid_buy_sol=@validBuySol, raw_buy_sol=@rawBuySol,
           follow_sell_sol=@followSellSol, unique_buyers=@uniqueBuyers,
           buy_to_dump_pct=@buyToDumpPct, price_bounce_pct=@priceBouncePct,
-          max_recovery_pct=@maxRecoveryPct, current_quote_sol=@currentQuoteSol,
+          max_recovery_pct=@maxRecoveryPct, absorption_score=@absorptionScore,
+          absorption_score_components_json=@absorptionScoreComponentsJson,
+          current_quote_sol=@currentQuoteSol,
           quote_retention_pct=@quoteRetentionPct,
           strict_same_slot_buys=@strictSameSlotBuys,
           correlated_same_slot_buys=@correlatedSameSlotBuys,
@@ -800,13 +846,13 @@ class ResearchStore {
           instruction_index,event_index,signature,ordering_confidence,slot_delta,
           current_price,low_price,price_bounce_pct,drop_recovery_pct,valid_buy_sol,
           unique_buyers,buy_to_dump_pct,net_flow_sol,net_flow_1s_sol,net_flow_3s_sol,
-          current_quote_sol,snapshot_json
+          current_quote_sol,absorption_score,absorption_score_components_json,snapshot_json
         ) VALUES (
           @confirmationId,@episodeId,@profileId,@confirmedAtMs,@slot,@transactionIndex,
           @instructionIndex,@eventIndex,@signature,@orderingConfidence,@slotDelta,
           @currentPrice,@lowPrice,@priceBouncePct,@dropRecoveryPct,@validBuySol,
           @uniqueBuyers,@buyToDumpPct,@netFlowSol,@netFlow1sSol,@netFlow3sSol,
-          @currentQuoteSol,@snapshotJson
+          @currentQuoteSol,@absorptionScore,@absorptionScoreComponentsJson,@snapshotJson
         )
       `),
       sameSlotObservation: this.db.prepare(`
@@ -1067,6 +1113,27 @@ class ResearchStore {
     });
   }
 
+  recordWatchedWalletTrade(trade) {
+    if (trade?.type !== 'ammTrade' || !trade.wallet || !trade.signature) return;
+    const eventIndex = number(trade.eventIndex) ?? 0;
+    this._enqueue(this.statements.watchedWalletTrade, {
+      observationId: `${trade.wallet}:${trade.signature}:${eventIndex}`,
+      wallet: trade.wallet,
+      receivedAtMs: number(trade.receivedAtMs) || Date.now(),
+      chainTimestampMs: number(trade.chainTimestampMs),
+      slot: number(trade.slot),
+      transactionIndex: number(trade.transactionIndex),
+      instructionIndex: number(trade.instructionIndex),
+      eventIndex,
+      signature: trade.signature,
+      orderingConfidence: trade.orderingConfidence || 'SLOT_CORRELATED',
+      mint: value(trade.mint), pool: value(trade.pool), side: trade.side,
+      solAmount: number(trade.solAmount), tokenAmount: number(trade.tokenAmount),
+      price: number(trade.price), reservePrice: number(trade.reservePrice),
+      ingestionMode: value(trade.ingestionMode || 'UNKNOWN'),
+    });
+  }
+
   recordSlotSummary(summary) {
     this._enqueue(this.statements.slot, {
       ...summary,
@@ -1104,6 +1171,8 @@ class ResearchStore {
       uniqueBuyers: number(snapshot.uniqueBuyers) || 0,
       buyToDumpPct: number(snapshot.buyToDumpPct), priceBouncePct: number(snapshot.priceBouncePct),
       maxRecoveryPct: number(snapshot.maxRecoveryPct) || 0,
+      absorptionScore: number(snapshot.absorptionScore),
+      absorptionScoreComponentsJson: json(snapshot.absorptionScoreComponents),
       currentQuoteSol: number(snapshot.currentQuoteSol), quoteRetentionPct: number(snapshot.quoteRetentionPct),
       strictSameSlotBuys: number(snapshot.strictSameSlotBuys) || 0,
       correlatedSameSlotBuys: number(snapshot.correlatedSameSlotBuys) || 0,
@@ -1126,6 +1195,8 @@ class ResearchStore {
       uniqueBuyers: number(snapshot.uniqueBuyers), buyToDumpPct: number(snapshot.buyToDumpPct),
       netFlowSol: number(snapshot.netFlowSol), netFlow1sSol: number(snapshot.netFlow1sSol),
       netFlow3sSol: number(snapshot.netFlow3sSol), currentQuoteSol: number(snapshot.currentQuoteSol),
+      absorptionScore: number(snapshot.absorptionScore),
+      absorptionScoreComponentsJson: json(snapshot.absorptionScoreComponents),
       snapshotJson: json(snapshot) || '{}',
     });
   }
@@ -1369,7 +1440,8 @@ class ResearchStore {
         AVG(valid_buy_sol) average_valid_buy_sol,
         AVG(unique_buyers) average_unique_buyers,
         AVG(buy_to_dump_pct) average_buy_to_dump_pct,
-        AVG(max_recovery_pct) average_max_recovery_pct
+        AVG(max_recovery_pct) average_max_recovery_pct,
+        AVG(absorption_score) average_absorption_score
       FROM dump_events
       WHERE (drop_pct IS NULL OR drop_pct<=?)
         AND (? IS NULL OR parse_version=?)
@@ -1387,6 +1459,35 @@ class ResearchStore {
         AND (d.max_recovery_pct IS NULL OR d.max_recovery_pct<=?)
     `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       this.config.maxReportedRecoveryPct);
+    const watchedWallet = this.db.prepare(`
+      SELECT COUNT(*) observations,
+        COUNT(DISTINCT wallet) wallets,
+        COUNT(DISTINCT mint) mints,
+        SUM(CASE WHEN side='BUY' THEN 1 ELSE 0 END) buys,
+        SUM(CASE WHEN side='SELL' THEN 1 ELSE 0 END) sells,
+        SUM(CASE WHEN side='BUY' THEN COALESCE(sol_amount,0) ELSE 0 END) buy_sol,
+        SUM(CASE WHEN side='SELL' THEN COALESCE(sol_amount,0) ELSE 0 END) sell_sol,
+        COUNT(DISTINCT CASE WHEN EXISTS (
+          SELECT 1 FROM dump_events d
+          WHERE d.pool=watched_wallet_trades.pool
+            AND watched_wallet_trades.received_at_ms BETWEEN d.detected_at_ms-5000
+              AND d.detected_at_ms+20000
+        ) THEN observation_id END) around_dump_trades,
+        COUNT(DISTINCT CASE WHEN EXISTS (
+          SELECT 1 FROM dump_events d
+          WHERE d.pool=watched_wallet_trades.pool
+            AND watched_wallet_trades.side='BUY'
+            AND watched_wallet_trades.slot=d.slot
+            AND watched_wallet_trades.received_at_ms>=d.detected_at_ms
+        ) THEN observation_id END) same_slot_post_dump_buys,
+        COUNT(DISTINCT CASE WHEN EXISTS (
+          SELECT 1 FROM dump_events d
+          WHERE d.pool=watched_wallet_trades.pool
+            AND watched_wallet_trades.side='BUY'
+            AND watched_wallet_trades.slot=d.slot+1
+        ) THEN observation_id END) next_slot_post_dump_buys
+      FROM watched_wallet_trades
+    `).get();
     const confirmationCoverage = this.db.prepare(`
       WITH coverage AS (
         SELECT c.confirmation_id,c.episode_id,
@@ -1654,11 +1755,24 @@ class ResearchStore {
         averageUniqueBuyers: dump.average_unique_buyers,
         averageBuyToDumpPct: dump.average_buy_to_dump_pct,
         averageMaxRecoveryPct: dump.average_max_recovery_pct,
+        averageAbsorptionScore: dump.average_absorption_score,
         abnormalRecoveryEvents: abnormalRecovery.count || 0,
         totalStoredEvents: dataQuality.total || 0,
         trustedVersionEvents: dataQuality.trusted_version || 0,
         excludedLegacyPriceEvents: dataQuality.excluded_legacy_version || 0,
         excludedOverMaxDropEvents: dataQuality.excluded_over_max_drop || 0,
+      },
+      walletResearch: {
+        observations: watchedWallet.observations || 0,
+        wallets: watchedWallet.wallets || 0,
+        mints: watchedWallet.mints || 0,
+        buys: watchedWallet.buys || 0,
+        sells: watchedWallet.sells || 0,
+        buySol: watchedWallet.buy_sol || 0,
+        sellSol: watchedWallet.sell_sol || 0,
+        aroundDumpTrades: watchedWallet.around_dump_trades || 0,
+        sameSlotPostDumpBuys: watchedWallet.same_slot_post_dump_buys || 0,
+        nextSlotPostDumpBuys: watchedWallet.next_slot_post_dump_buys || 0,
       },
       sameSlotProbe: {
         observations: sameSlot.observations || 0,
@@ -2159,6 +2273,25 @@ class ResearchStore {
       SELECT * FROM ranked ORDER BY observed_at_ms DESC LIMIT ?
     `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
       Math.max(1, Math.min(1_000, Math.trunc(limit))));
+  }
+
+  recentWatchedWalletTradesPage(page = 1, pageSize = 20) {
+    this.flush();
+    const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
+    const total = this.db.prepare('SELECT COUNT(*) count FROM watched_wallet_trades').get().count;
+    const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
+    const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
+    const items = this.db.prepare(`
+      SELECT * FROM watched_wallet_trades
+      ORDER BY received_at_ms DESC LIMIT ? OFFSET ?
+    `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+    return {
+      items,
+      page: normalizedPage,
+      pageSize: normalizedSize,
+      total,
+      totalPages,
+    };
   }
 
   recentSameSlotObservationsPage(page = 1, pageSize = 20) {

@@ -62,6 +62,7 @@ class SameSlotShadowSimulator {
       roundTripCostTooHigh: 0,
       rank2B2Entries: 0,
       rank2B5Entries: 0,
+      toxicEpisodesTracked: 0,
       rescueStarted: 0,
       rescue5sFilled: 0,
       rescue10sFilled: 0,
@@ -72,12 +73,10 @@ class SameSlotShadowSimulator {
 
   startEpisode(dump, toxic = {}) {
     if (!this.config.enabled || !dump?.episodeId || !dump.pool || !dump.signalTrade) return [];
-    if (toxic.rejected) {
-      this.metrics.toxicEpisodesSkipped += 1;
-      return [];
-    }
+    if (toxic.rejected) this.metrics.toxicEpisodesTracked += 1;
     this.episodes.set(dump.episodeId, {
       dump,
+      toxic,
       trades: [],
       finalized: false,
       dataQuality: assessTradeDataQuality(dump.signalTrade, this.config),
@@ -122,7 +121,7 @@ class SameSlotShadowSimulator {
   _measureCandidateTrigger(state, trade) {
     const candidate = this.config.candidate || { enabled: false };
     const dump = state?.dump;
-    if (!candidate.enabled || !dump || trade?.side !== 'BUY'
+    if (!candidate.enabled || !dump || state.toxic?.rejected || trade?.side !== 'BUY'
       || finite(trade.solAmount, 0) < finite(candidate.minTriggerBuySol, Infinity)
       || finite(dump.postQuoteSol, 0) < finite(candidate.minPostQuoteSol, Infinity)
       || finite(dump.dropPct, Infinity) > finite(candidate.maxDropPct, -Infinity)
@@ -273,6 +272,7 @@ class SameSlotShadowSimulator {
       triggerTrade: null,
       cohortStage: 'CONTROL',
       quality: state.dataQuality,
+      toxic: state.toxic,
     });
     if (strictBuys[0]) {
       const firstBuyAtMs = finite(
@@ -280,11 +280,19 @@ class SameSlotShadowSimulator {
         dump.detectedAtMs,
       );
       const triggerBuySol = finite(strictBuys[0].solAmount, 0);
-      const rank2ProfileId = triggerBuySol >= this.config.strongRank2TriggerBuySol
-        ? 'R2-B5'
-        : (triggerBuySol >= this.config.minRank2TriggerBuySol ? 'R2-B2' : 'R2-BASE');
-      const cohortStage = rank2ProfileId === this.config.primaryProfileId
-        ? this.config.primaryCohortStage : 'CONTROL';
+      const triggerBuyToDumpPct = pct(triggerBuySol, finite(dump.sellSol, 0));
+      const meaningfulThresholdSol = Math.max(
+        finite(this.config.minMeaningfulBuySol, 0.1),
+        finite(dump.sellSol, 0) * finite(this.config.minMeaningfulBuyToDumpPct, 1) / 100,
+      );
+      const rank2ProfileId = triggerBuySol < meaningfulThresholdSol
+        ? 'R2-DUST'
+        : (triggerBuyToDumpPct >= 5 ? 'R2-A5'
+          : (triggerBuyToDumpPct >= 2 ? 'R2-A2' : 'R2-A1'));
+      const cohortStage = state.toxic?.rejected
+        ? 'BROAD_RESEARCH_TOXIC_V1'
+        : (rank2ProfileId === this.config.primaryProfileId
+          ? this.config.primaryCohortStage : 'BROAD_RESEARCH_V1');
       const rank2Quality = assessTradeDataQuality(
         strictBuys[0], this.config, dump.signalTrade,
       );
@@ -304,6 +312,7 @@ class SameSlotShadowSimulator {
         triggerTrade: strictBuys[0],
         cohortStage,
         quality: combinedQuality,
+        toxic: state.toxic,
       }));
       this._recordCompetitor({
         episodeId: dump.episodeId,
@@ -334,19 +343,21 @@ class SameSlotShadowSimulator {
 
   _scheduleRank({
     dump, targetRank, entryProfileId, entryReferenceTrade, entryAtMs, entryAssumption,
-    entryReferenceRank, triggerTrade, cohortStage, quality,
+    entryReferenceRank, triggerTrade, cohortStage, quality, toxic = {},
   }) {
     if (!this.config.targetRanks.includes(targetRank)) return [];
     const created = [];
     const candidate = this.config.candidate || { enabled: false };
     const candidateEligible = Boolean(candidate.enabled && targetRank === 2
-      && entryProfileId === 'R2-B5' && quality.status === 'TRUSTED'
+      && !toxic.rejected && quality.status === 'TRUSTED'
       && finite(triggerTrade?.solAmount, 0) >= finite(candidate.minTriggerBuySol, Infinity)
       && finite(dump.postQuoteSol, 0) >= finite(candidate.minPostQuoteSol, Infinity)
       && finite(dump.dropPct, Infinity) <= finite(candidate.maxDropPct, -Infinity));
     const candidateNovelMint = candidateEligible
       && !this.store?.isCandidateMintExcluded?.(candidate.profileId, dump.mint);
     for (const positionSol of this.config.positionSizesSol) {
+      const configuredHorizons = this.config.exitHorizonsByPositionSol?.[positionSol]
+        || this.config.exitHorizonsMs;
       const capacity = quoteImmediateRoundTrip(entryReferenceTrade, positionSol, {
         buySlippageBps: this.config.buySlippageBps,
         sellSlippageBps: this.config.sellSlippageBps,
@@ -358,21 +369,21 @@ class SameSlotShadowSimulator {
       let rejectionReason = capacity.available ? null : capacity.reason;
       if (quality.status !== 'TRUSTED') {
         rejectionReason = 'DATA_QUALITY_REJECTED_ENTRY';
-        this.metrics.dataQualityQuarantined += this.config.exitHorizonsMs.length;
+        this.metrics.dataQualityQuarantined += configuredHorizons.length;
       }
       if (!rejectionReason && (
         capacity.entryLiquidityUsagePct > this.config.maxEntryLiquidityUsagePct
         || capacity.exitLiquidityUsagePct > this.config.maxExitLiquidityUsagePct
       )) {
         rejectionReason = 'INSUFFICIENT_ROUND_TRIP_LIQUIDITY';
-        this.metrics.insufficientRoundTripLiquidity += this.config.exitHorizonsMs.length;
+        this.metrics.insufficientRoundTripLiquidity += configuredHorizons.length;
       }
       if (!rejectionReason
         && capacityRoundTripLossPct > this.config.maxImmediateRoundTripLossPct) {
         rejectionReason = 'ROUND_TRIP_COST_TOO_HIGH';
-        this.metrics.roundTripCostTooHigh += this.config.exitHorizonsMs.length;
+        this.metrics.roundTripCostTooHigh += configuredHorizons.length;
       }
-      for (const exitHorizonMs of this.config.exitHorizonsMs) {
+      for (const exitHorizonMs of configuredHorizons) {
         const shadowId = [
           dump.episodeId, `R${targetRank}`, positionSol.toFixed(3), `X${exitHorizonMs}`,
         ].join(':');

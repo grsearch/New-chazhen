@@ -25,6 +25,10 @@ const EXPLICIT_FILTERS = Object.freeze({
       AND (drop_pct IS NULL OR drop_pct <= ?) AND parse_version = ?`,
     bind: (startMs, endMs) => [startMs, endMs, MAX_DUMP_DROP_PCT, PUMP_PARSE_VERSION],
   },
+  watched_wallet_trades: {
+    where: 'received_at_ms >= ? AND received_at_ms < ?',
+    bind: (startMs, endMs) => [startMs, endMs],
+  },
   confirmations: {
     where: 'episode_id IN (SELECT episode_id FROM main.dump_events)',
     bind: () => [],
@@ -62,7 +66,11 @@ const ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
   slot_summaries: ['first_received_at_ms', 'last_received_at_ms'],
   dump_events: [
     'episode_id', 'mint', 'detected_at_ms', 'drop_pct', 'toxic_rejected', 'parse_version',
-    'ingestion_mode',
+    'ingestion_mode', 'absorption_score',
+  ],
+  watched_wallet_trades: [
+    'wallet', 'received_at_ms', 'slot', 'transaction_index', 'signature', 'mint', 'pool',
+    'side', 'sol_amount', 'price', 'ingestion_mode',
   ],
   same_slot_observations: [
     'episode_id', 'observed_at_ms', 'buy_transaction_index', 'instruction_index',
@@ -85,17 +93,12 @@ const ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
 
 const GO_NO_GO_THRESHOLDS = Object.freeze({
   minimumCoverageHours: 23,
-  minimumB5Episodes: 100,
-  minimumB5Mints: 50,
-  minimumPrimaryExitEpisodes: 30,
-  minimumHeadroomSampleEpisodes: 30,
+  minimumBroadEpisodes: 300,
+  minimumBroadMints: 150,
+  minimumSameSlotEpisodes: 100,
+  minimumNextSlotEpisodes: 100,
   minimumTerminalRowsPct: 95,
   minimumAssessedObservationPct: 90,
-  minimumCandidateEpisodes: 100,
-  minimumCandidateMints: 50,
-  minimumCandidateFullLossProfitFactor: 1.3,
-  requiredPositionsSol: [1, 2, 5],
-  requiredExitHorizonsMs: [100, 250, 500],
 });
 
 function parseArgs(argv) {
@@ -186,6 +189,16 @@ function researchReadiness(databasePath, startMs, endMs) {
     const empty = {
       stream: { coverageHours: 0, maximumObservedGapMs: null, slotSummaries: 0 },
       dumps: { episodes: 0, mints: 0 },
+      broadResearch: {
+        episodes: 0, mints: 0, averageAbsorptionScore: null,
+        score60Episodes: 0, score75Episodes: 0,
+        sameSlotEpisodes: 0, nextSlotEpisodes: 0, nextSlotProfiles: [],
+        simulationRows: 0, terminalSimulationRows: 0, terminalSimulationRowsPct: null,
+      },
+      walletResearch: {
+        observations: 0, mints: 0, buys: 0, sells: 0,
+        buySol: 0, sellSol: 0,
+      },
       observations: {
         total: 0, trusted: 0, unassessed: 0, quarantined: 0, assessedPct: null,
       },
@@ -222,6 +235,50 @@ function researchReadiness(databasePath, startMs, endMs) {
       `).get();
       const dumps = db.prepare(`
         SELECT COUNT(*) episodes,COUNT(DISTINCT mint) mints FROM dump_events
+      `).get();
+      const broadDumps = db.prepare(`
+        SELECT COUNT(*) episodes,COUNT(DISTINCT mint) mints,
+          AVG(absorption_score) average_absorption_score,
+          SUM(CASE WHEN absorption_score>=60 THEN 1 ELSE 0 END) score_60_episodes,
+          SUM(CASE WHEN absorption_score>=75 THEN 1 ELSE 0 END) score_75_episodes
+        FROM dump_events
+        WHERE drop_pct BETWEEN 5 AND 40 AND sell_to_quote_pct>=2 AND post_quote_sol>=20
+      `).get();
+      const broadSameSlot = db.prepare(`
+        SELECT COUNT(DISTINCT o.episode_id) episodes
+        FROM same_slot_observations o
+        JOIN dump_events d ON d.episode_id=o.episode_id
+        WHERE o.classification='STRICT_AFTER_DUMP'
+          AND COALESCE(o.data_quality_status,'UNASSESSED')<>'QUARANTINED'
+          AND d.drop_pct BETWEEN 5 AND 40
+      `).get();
+      const broadNextSlot = db.prepare(`
+        SELECT COUNT(DISTINCT c.episode_id) episodes
+        FROM confirmations c
+        WHERE c.profile_id LIKE 'N1-%'
+      `).get();
+      const nextSlotProfiles = db.prepare(`
+        SELECT c.profile_id profileId,COUNT(DISTINCT c.episode_id) episodes,
+          COUNT(DISTINCT d.mint) mints,AVG(c.absorption_score) averageAbsorptionScore
+        FROM confirmations c
+        JOIN dump_events d ON d.episode_id=c.episode_id
+        WHERE c.profile_id LIKE 'N1-%'
+        GROUP BY c.profile_id ORDER BY c.profile_id
+      `).all();
+      const nextSlotSimulation = db.prepare(`
+        SELECT COUNT(*) rows,
+          SUM(CASE WHEN s.status IN ('CLOSED','NO_EXIT','NO_ENTRY') THEN 1 ELSE 0 END)
+            terminal_rows
+        FROM simulations s
+        WHERE s.recovery_profile_id LIKE 'N1-%'
+      `).get();
+      const walletResearch = db.prepare(`
+        SELECT COUNT(*) observations,COUNT(DISTINCT mint) mints,
+          SUM(CASE WHEN side='BUY' THEN 1 ELSE 0 END) buys,
+          SUM(CASE WHEN side='SELL' THEN 1 ELSE 0 END) sells,
+          SUM(CASE WHEN side='BUY' THEN COALESCE(sol_amount,0) ELSE 0 END) buy_sol,
+          SUM(CASE WHEN side='SELL' THEN COALESCE(sol_amount,0) ELSE 0 END) sell_sol
+        FROM watched_wallet_trades
       `).get();
       const observations = missingColumns.includes(observationQualityColumn)
         ? db.prepare(`
@@ -341,6 +398,29 @@ function researchReadiness(databasePath, startMs, endMs) {
           slotSummaries: stream.slot_summaries || 0,
         },
         dumps: { episodes: dumps.episodes || 0, mints: dumps.mints || 0 },
+        broadResearch: {
+          episodes: broadDumps.episodes || 0,
+          mints: broadDumps.mints || 0,
+          averageAbsorptionScore: broadDumps.average_absorption_score,
+          score60Episodes: broadDumps.score_60_episodes || 0,
+          score75Episodes: broadDumps.score_75_episodes || 0,
+          sameSlotEpisodes: broadSameSlot.episodes || 0,
+          nextSlotEpisodes: broadNextSlot.episodes || 0,
+          nextSlotProfiles,
+          simulationRows: nextSlotSimulation.rows || 0,
+          terminalSimulationRows: nextSlotSimulation.terminal_rows || 0,
+          terminalSimulationRowsPct: percentage(
+            nextSlotSimulation.terminal_rows || 0, nextSlotSimulation.rows || 0,
+          ),
+        },
+        walletResearch: {
+          observations: walletResearch.observations || 0,
+          mints: walletResearch.mints || 0,
+          buys: walletResearch.buys || 0,
+          sells: walletResearch.sells || 0,
+          buySol: walletResearch.buy_sol || 0,
+          sellSol: walletResearch.sell_sol || 0,
+        },
         observations: {
           total: observations.total || 0,
           trusted: observations.trusted || 0,
@@ -392,13 +472,6 @@ function researchReadiness(databasePath, startMs, endMs) {
         ingestion: { tradeRowsByMode, dumpEpisodesByMode },
       };
     }
-    const expectedCohorts = GO_NO_GO_THRESHOLDS.requiredPositionsSol.flatMap(
-      (positionSol) => GO_NO_GO_THRESHOLDS.requiredExitHorizonsMs
-        .map((exitHorizonMs) => `${positionSol}:${exitHorizonMs}`),
-    );
-    const actualCohorts = new Set(metrics.b5.cohorts
-      .map((row) => `${row.positionSol}:${row.exitHorizonMs}`));
-    const missingCohorts = expectedCohorts.filter((key) => !actualCohorts.has(key));
     const gates = [
       {
         id: 'REQUIRED_SCHEMA_FIELDS', passed: missingColumns.length === 0,
@@ -418,77 +491,50 @@ function researchReadiness(databasePath, startMs, endMs) {
         required: GO_NO_GO_THRESHOLDS.minimumAssessedObservationPct,
       },
       {
-        id: 'TRUSTED_B5_EPISODES',
-        passed: metrics.b5.episodes >= GO_NO_GO_THRESHOLDS.minimumB5Episodes,
-        actual: metrics.b5.episodes, required: GO_NO_GO_THRESHOLDS.minimumB5Episodes,
+        id: 'BROAD_RESEARCH_EPISODES',
+        passed: metrics.broadResearch.episodes
+          >= GO_NO_GO_THRESHOLDS.minimumBroadEpisodes,
+        actual: metrics.broadResearch.episodes,
+        required: GO_NO_GO_THRESHOLDS.minimumBroadEpisodes,
       },
       {
-        id: 'TRUSTED_B5_MINTS',
-        passed: metrics.b5.mints >= GO_NO_GO_THRESHOLDS.minimumB5Mints,
-        actual: metrics.b5.mints, required: GO_NO_GO_THRESHOLDS.minimumB5Mints,
+        id: 'BROAD_RESEARCH_MINTS',
+        passed: metrics.broadResearch.mints >= GO_NO_GO_THRESHOLDS.minimumBroadMints,
+        actual: metrics.broadResearch.mints,
+        required: GO_NO_GO_THRESHOLDS.minimumBroadMints,
       },
       {
-        id: 'PRIMARY_EXIT_EPISODES',
-        passed: metrics.b5.primaryExitEpisodes
-          >= GO_NO_GO_THRESHOLDS.minimumPrimaryExitEpisodes,
-        actual: metrics.b5.primaryExitEpisodes,
-        required: GO_NO_GO_THRESHOLDS.minimumPrimaryExitEpisodes,
+        id: 'SAME_SLOT_RESEARCH_EPISODES',
+        passed: metrics.broadResearch.sameSlotEpisodes
+          >= GO_NO_GO_THRESHOLDS.minimumSameSlotEpisodes,
+        actual: metrics.broadResearch.sameSlotEpisodes,
+        required: GO_NO_GO_THRESHOLDS.minimumSameSlotEpisodes,
       },
       {
-        id: 'RANK2_HEADROOM_SAMPLE_EPISODES',
-        passed: metrics.b5.headroomSampleEpisodes
-          >= GO_NO_GO_THRESHOLDS.minimumHeadroomSampleEpisodes,
-        actual: metrics.b5.headroomSampleEpisodes,
-        required: GO_NO_GO_THRESHOLDS.minimumHeadroomSampleEpisodes,
+        id: 'NEXT_SLOT_RESEARCH_EPISODES',
+        passed: metrics.broadResearch.nextSlotEpisodes
+          >= GO_NO_GO_THRESHOLDS.minimumNextSlotEpisodes,
+        actual: metrics.broadResearch.nextSlotEpisodes,
+        required: GO_NO_GO_THRESHOLDS.minimumNextSlotEpisodes,
       },
       {
-        id: 'TERMINAL_B5_ROWS_PCT',
-        passed: (metrics.b5.terminalRowsPct || 0)
+        id: 'NEXT_SLOT_TERMINAL_ROWS_PCT',
+        passed: (metrics.broadResearch.terminalSimulationRowsPct || 0)
           >= GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
-        actual: metrics.b5.terminalRowsPct,
+        actual: metrics.broadResearch.terminalSimulationRowsPct,
         required: GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
-      },
-      {
-        id: 'ALL_POSITION_EXIT_COHORTS', passed: missingCohorts.length === 0,
-        actual: metrics.b5.cohortCount, required: expectedCohorts.length,
-      },
-      {
-        id: 'NEW_CANDIDATE_EPISODES',
-        passed: metrics.candidate.episodes >= GO_NO_GO_THRESHOLDS.minimumCandidateEpisodes,
-        actual: metrics.candidate.episodes,
-        required: GO_NO_GO_THRESHOLDS.minimumCandidateEpisodes,
-      },
-      {
-        id: 'NEW_CANDIDATE_MINTS',
-        passed: metrics.candidate.mints >= GO_NO_GO_THRESHOLDS.minimumCandidateMints,
-        actual: metrics.candidate.mints,
-        required: GO_NO_GO_THRESHOLDS.minimumCandidateMints,
-      },
-      {
-        id: 'CANDIDATE_TERMINAL_ROWS_PCT',
-        passed: (metrics.candidate.terminalRowsPct || 0)
-          >= GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
-        actual: metrics.candidate.terminalRowsPct,
-        required: GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
-      },
-      {
-        id: 'CANDIDATE_FULL_LOSS_PROFIT_FACTOR',
-        passed: (metrics.candidate.fullLossProfitFactor || 0)
-          >= GO_NO_GO_THRESHOLDS.minimumCandidateFullLossProfitFactor,
-        actual: metrics.candidate.fullLossProfitFactor,
-        required: GO_NO_GO_THRESHOLDS.minimumCandidateFullLossProfitFactor,
       },
     ];
     const ready = gates.every((gate) => gate.passed);
     return {
-      status: ready ? 'READY_FOR_EXECUTION_REVIEW' : 'COLLECT_MORE_DATA',
+      status: ready ? 'READY_FOR_ANALYSIS' : 'COLLECT_MORE_DATA',
       liveTradingDecision: 'TRADING_DISABLED',
       note: 'Readiness only means the dataset can support analysis; it is not permission to trade.',
       schemaVersion,
       windowHours,
       thresholds: GO_NO_GO_THRESHOLDS,
       missingColumns,
-      missingCohorts,
+      missingCohorts: [],
       gates,
       ...metrics,
     };

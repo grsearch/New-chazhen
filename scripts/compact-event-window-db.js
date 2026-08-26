@@ -65,6 +65,7 @@ function compactDatabase({ sourcePath, destinationPath, preWindowMs = 5_000, pos
       for (const table of [
         'dump_events', 'confirmations', 'same_slot_observations',
         'same_slot_shadow_simulations', 'simulations', 'toxic_wallets',
+        'watched_wallet_trades',
       ]) {
         copied[table] = tableExists(db, 'source', table) ? copyTable(db, table) : 0;
       }

@@ -41,8 +41,10 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
   assert.match(source, /id="same-slot-pager"/);
   assert.match(source, /id="same-slot-shadow-pager"/);
-  assert.match(source, /核心：R2-B10-Q500-V1 冻结候选组/);
-  assert.match(source, /主组合 1 SOL \/ 250ms/);
+  assert.match(source, /id="watched-wallets-pager"/);
+  assert.match(source, /watched-wallets\?page=\$\{state\.walletPage\}/);
+  assert.match(source, /同 Slot Shadow 组合/);
+  assert.match(source, /R2-A1宽口径主研究/);
   assert.match(source, /真实落地\/排名样本','0 \/ 0'/);
   assert.match(source, /Rank#2买单间隔P50/);
   assert.match(source, /含救援NO_EXIT=-15% \+ Jito 0\.01/);
@@ -52,9 +54,10 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.match(source, /Rank#1延迟P50/);
   assert.match(source, /<th>观测排名<\/th>/);
   assert.match(source, /<th>链上Tx位置<\/th>/);
-  assert.match(source, /R2-B5验证事件/);
-  assert.match(source, /B5 >23ms\/全部事件/);
-  assert.match(source, /B5事件含5s救援/);
+  assert.match(source, /R2-A1研究事件/);
+  assert.match(source, /下一Slot确认事件/);
+  assert.match(source, /观察钱包成交/);
+  assert.match(source, /吸收评分/);
   assert.match(source, /<th>主Exit<\/th>/);
   assert.match(source, /主退出持有 P50\/P95/);
   assert.match(source, /主窗口失败=-15% \+ Jito 0\.01/);
@@ -80,6 +83,18 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   `);
   for (let index = 0; index < 23; index += 1) {
     insert.run(`episode-${index}`, `mint-${index}`, `pool-${index}`, index, 'STRICT', index);
+  }
+  const insertWatched = store.db.prepare(`
+    INSERT INTO watched_wallet_trades(
+      observation_id,wallet,received_at_ms,event_index,signature,
+      ordering_confidence,mint,pool,side,sol_amount
+    ) VALUES(?,?,?,?,?,'STRICT',?,?,?,?)
+  `);
+  for (let index = 0; index < 23; index += 1) {
+    insertWatched.run(
+      `watched-${index}`, 'wallet', index, 0, `signature-${index}`,
+      `mint-${index}`, `pool-${index}`, 'BUY', index,
+    );
   }
   const insertSameSlot = store.db.prepare(`
     INSERT INTO same_slot_observations(
@@ -121,4 +136,14 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   assert.equal(sameSlot.totalPages, 3);
   assert.equal(sameSlot.items.length, 10);
   assert.equal(sameSlot.items[0].observation_id, 'observation-12');
+
+  const walletResponse = await fetch(
+    `http://127.0.0.1:${port}/api/watched-wallets?page=2&pageSize=10`,
+  );
+  assert.equal(walletResponse.status, 200);
+  const wallet = await walletResponse.json();
+  assert.equal(wallet.page, 2);
+  assert.equal(wallet.total, 23);
+  assert.equal(wallet.items.length, 10);
+  assert.equal(wallet.items[0].observation_id, 'watched-12');
 });

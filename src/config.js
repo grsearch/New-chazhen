@@ -110,10 +110,16 @@ const config = {
   dump: {
     preWindowMs: 5_000,
     priceFreshMs: 5_000,
-    episodeCooldownMs: 10_000,
+    // Parser/signature de-duplication already prevents duplicate events.  A short
+    // cooldown only suppresses repeated parser deliveries, without hiding a
+    // second independent dump from the same mint.
+    episodeCooldownMs: 1_000,
     stateRetentionMs: 30 * 60_000,
     maxDropPct: maxDumpDropPct,
     profiles: [
+      // Broad research intake.  Quality and toxicity are recorded as features;
+      // they are not allowed to erase the observation before it can be studied.
+      { id: 'D2-P5-Q20-RESEARCH', minSellToQuotePct: 2, minDropPct: 5, minPostQuoteSol: 20, minPoolAgeMs: 0 },
       { id: 'D5-P15-Q20-A1', minSellToQuotePct: 5, minDropPct: 15, minPostQuoteSol: 20, minPoolAgeMs: 60_000 },
       { id: 'D10-P25-Q50-A5', minSellToQuotePct: 10, minDropPct: 25, minPostQuoteSol: 50, minPoolAgeMs: 5 * 60_000 },
     ],
@@ -136,7 +142,7 @@ const config = {
   recovery: {
     maxObservationMs: 20_000,
     maxSlotDelta: 40,
-    minValidBuySol: number('SDBR_MIN_VALID_BUY_SOL', 0.05, { min: 0.000001 }),
+    minValidBuySol: number('SDBR_MIN_VALID_BUY_SOL', 0.1, { min: 0.000001 }),
     secondDumpMinSol: 1,
     secondDumpFractionOfInitial: 0.2,
     secondDumpMinPriceDropPct: 8,
@@ -145,6 +151,34 @@ const config = {
       min: 100, max: 10_000,
     }),
     profiles: [
+      // Causal N+1 research milestones.  These deliberately use broad gates and
+      // retain toxic-labelled dumps as negative controls.  Later analysis ranks
+      // them by absorptionScore instead of treating every confirmation as a
+      // live-trading signal.
+      {
+        id: 'N1-FB', researchOnly: true, allowToxicResearch: true,
+        minSlotDelta: 1, maxSlotDelta: 1, minPriceBouncePct: 0,
+        minDropRecoveryPct: 0, minUniqueBuyers: 1, minBuySol: 0.1,
+        minBuyToDumpPct: 1, requirePositiveNetFlow: false,
+      },
+      {
+        id: 'N1-A5', researchOnly: true, allowToxicResearch: true,
+        minSlotDelta: 1, maxSlotDelta: 1, minPriceBouncePct: 0,
+        minDropRecoveryPct: 0, minUniqueBuyers: 1, minBuySol: 0.1,
+        minBuyToDumpPct: 5, requirePositiveNetFlow: false,
+      },
+      {
+        id: 'N1-P2', researchOnly: true, allowToxicResearch: true,
+        minSlotDelta: 1, maxSlotDelta: 1, minPriceBouncePct: 2,
+        minDropRecoveryPct: 0, minUniqueBuyers: 1, minBuySol: 0.1,
+        minBuyToDumpPct: 1, requirePositiveNetFlow: false,
+      },
+      {
+        id: 'N1-B2', researchOnly: true, allowToxicResearch: true,
+        minSlotDelta: 1, maxSlotDelta: 1, minPriceBouncePct: 0,
+        minDropRecoveryPct: 0, minUniqueBuyers: 2, minBuySol: 0.1,
+        minBuyToDumpPct: 1, requirePositiveNetFlow: false,
+      },
       {
         id: 'PD-R1', maxSlotDelta: 4, minPriceBouncePct: 5,
         minDropRecoveryPct: 20, minUniqueBuyers: 2, minBuySol: 0.5,
@@ -164,15 +198,34 @@ const config = {
       },
     ],
   },
+  walletResearch: {
+    enabled: boolean('SDBR_WALLET_RESEARCH_ENABLED', true),
+    // These trades are already present in the PumpSwap program stream, so this
+    // adds no second Helius subscription and no RPC polling.
+    wallets: new Set(list('SDBR_WATCH_WALLETS', [
+      'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz',
+    ])),
+  },
   sameSlotShadow: {
     enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', true),
     targetRanks: [1, 2],
-    primaryProfileId: 'R2-B5',
-    primaryCohortStage: 'HOLDOUT_B5_V1',
+    primaryProfileId: 'R2-A1',
+    primaryCohortStage: 'BROAD_RESEARCH_V1',
+    minMeaningfulBuySol: number('SDBR_MIN_MEANINGFUL_BUY_SOL', 0.1, { min: 0.000001 }),
+    minMeaningfulBuyToDumpPct: number('SDBR_MIN_MEANINGFUL_BUY_TO_DUMP_PCT', 1, {
+      min: 0.01, max: 100,
+    }),
     minRank2TriggerBuySol: number('SDBR_RANK2_MIN_TRIGGER_BUY_SOL', 2, { min: 0.01 }),
     strongRank2TriggerBuySol: number('SDBR_RANK2_STRONG_TRIGGER_BUY_SOL', 5, { min: 0.01 }),
     positionSizesSol,
-    exitHorizonsMs: [100, 250, 500],
+    exitHorizonsMs: [250, 500, 1_000, 2_000],
+    // 1 SOL receives the full horizon grid; 2/5 SOL remain capacity
+    // sensitivity checks at the two fastest exits.
+    exitHorizonsByPositionSol: Object.freeze({
+      1: [250, 500, 1_000, 2_000],
+      2: [250, 500],
+      5: [250, 500],
+    }),
     exitTimeoutMs: integer('SDBR_SAME_SLOT_EXIT_TIMEOUT_MS', 2_000, { min: 100 }),
     rescueHorizonsMs: numberList('SDBR_SAME_SLOT_RESCUE_HORIZONS_MS', [5_000, 10_000], {
       min: 1_000, max: 60_000,
@@ -210,7 +263,9 @@ const config = {
     signBudgetMs: number('SDBR_SPEED_SIGN_BUDGET_MS', 1, { min: 0 }),
     sendBudgetMs: number('SDBR_SPEED_SEND_BUDGET_MS', 15, { min: 0 }),
     candidate: Object.freeze({
-      enabled: true,
+      // Kept only so historical exports remain readable.  It is no longer the
+      // intake gate or the primary research direction.
+      enabled: false,
       profileId: 'R2-B10-Q500-V1',
       cohortStage: 'HOLDOUT_B10_Q500_V1',
       minTriggerBuySol: 10,
@@ -233,11 +288,9 @@ const config = {
   execution: {
     positionSizesSol,
     entryVariants: [
+      { id: 'E0', kind: 'DELAY', delayMs: 0 },
       { id: 'E100', kind: 'DELAY', delayMs: 100 },
-      { id: 'E200', kind: 'DELAY', delayMs: 200 },
-      { id: 'E400', kind: 'DELAY', delayMs: 400 },
-      { id: 'E800', kind: 'DELAY', delayMs: 800 },
-      { id: 'ENEXT', kind: 'NEXT_SLOT', delayMs: 0 },
+      { id: 'E250', kind: 'DELAY', delayMs: 250 },
     ],
     entryTimeoutMs: 2_000,
     exitDelayMs: 200,
@@ -253,17 +306,18 @@ const config = {
     priorityFeeSol: number('SDBR_PRIORITY_FEE_SOL', 0.0005, { min: 0 }),
     jitoTipSol: number('SDBR_JITO_TIP_SOL', 0, { min: 0 }),
     exitProfiles: [
+      { id: 'H025', kind: 'FIXED', holdMs: 250 },
+      { id: 'H05', kind: 'FIXED', holdMs: 500 },
       { id: 'H1', kind: 'FIXED', holdMs: 1_000 },
       { id: 'H2', kind: 'FIXED', holdMs: 2_000 },
-      { id: 'H3', kind: 'FIXED', holdMs: 3_000 },
-      { id: 'H5', kind: 'FIXED', holdMs: 5_000 },
-      { id: 'H10', kind: 'FIXED', holdMs: 10_000 },
-      { id: 'REC50', kind: 'RECOVERY', recoveryPct: 50, stopLossPct: -12, maxHoldMs: 10_000, flowExit: true },
-      { id: 'REC75', kind: 'RECOVERY', recoveryPct: 75, stopLossPct: -12, maxHoldMs: 15_000, flowExit: true },
-      { id: 'REC100', kind: 'RECOVERY', recoveryPct: 100, stopLossPct: -15, maxHoldMs: 20_000, flowExit: true },
-      { id: 'RISK8', kind: 'RISK', stopLossPct: -8, maxHoldMs: 10_000, flowExit: true },
-      { id: 'RISK15', kind: 'RISK', stopLossPct: -15, maxHoldMs: 20_000, flowExit: true },
     ],
+    // Avoid the old 3 x 5 x 10 Cartesian explosion.  The full timing grid is
+    // tested at 1 SOL; larger sizes are liquidity sensitivity checks only.
+    combinationGrid: Object.freeze([
+      { positionSol: 1, entryVariantIds: ['E0', 'E100', 'E250'], exitProfileIds: ['H025', 'H05', 'H1', 'H2'] },
+      { positionSol: 2, entryVariantIds: ['E100'], exitProfileIds: ['H025', 'H05'] },
+      { positionSol: 5, entryVariantIds: ['E100'], exitProfileIds: ['H025', 'H05'] },
+    ]),
   },
 };
 

@@ -42,6 +42,7 @@ class PostDumpRecoveryEngine {
       sameSlotObservations: 0,
       sameSlotShadowUpdates: 0,
       researchTradeWrites: 0,
+      watchedWalletTrades: 0,
       errors: 0,
       lastEventAtMs: null,
     };
@@ -57,6 +58,12 @@ class PostDumpRecoveryEngine {
     }
     if (event?.type !== 'ammTrade') return { dump: null, confirmations: [] };
     this.metrics.trades += 1;
+
+    if (this.config.walletResearch?.enabled
+      && this.config.walletResearch.wallets?.has(event.wallet)) {
+      this.store.recordWatchedWalletTrade?.(event);
+      this.metrics.watchedWalletTrades += 1;
+    }
 
     // Persist only causal research windows. DumpDetector still keeps the short
     // pre-window in memory, so unrelated PumpSwap traffic never reaches SQLite.
