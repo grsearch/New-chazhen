@@ -58,7 +58,7 @@
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在读取直接砸单矩阵…</section>
   <section class="panel">
-    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 <span id="quote-model">PUMPSWAP_DIRECT_DUMP_MANAGED_V2</span> · 胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 <span id="quote-model">PUMPSWAP_DIRECT_DUMP_MANAGED_V3</span> · NO_EXIT全损收益 ↓ · 实际入场数 ↓</span></div>
     <div class="table-wrap"><table id="strategies"></table></div><div class="pager" id="strategy-pager"></div>
   </section>
   <section class="panel">
@@ -90,9 +90,12 @@ const compareMetric=(a,b)=>{
   if(right==null)return -1;
   return right-left;
 };
-const compareCohorts=(a,b)=>compareMetric(a.winRatePct,b.winRatePct)
+const fullLossReturn=row=>row.noExitFullLossAverageNetReturnPct
+  ??combinedScenario(row.combinedScenarios,-100,0);
+const compareCohorts=(a,b)=>compareMetric(fullLossReturn(a),fullLossReturn(b))
+  ||compareMetric(a.entryFilled,b.entryFilled)
   ||compareMetric(a.averageNetReturnPct,b.averageNetReturnPct)
-  ||compareMetric(a.resolvedEpisodes??a.resolved,b.resolvedEpisodes??b.resolved)
+  ||compareMetric((a.exitFilled??a.resolved??0)+(a.noExit??0),(b.exitFilled??b.resolved??0)+(b.noExit??0))
   ||compareMetric(a.scheduled,b.scheduled);
 const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
 function pager(id,kind,page,totalPages,total){
@@ -107,14 +110,15 @@ function signalLabel(id){
   return match?`${sizes[match[1]]} / 跌${drops[match[2]]}`:(id||'—');
 }
 function entryLabel(id){
-  return ({E0:'紧跟砸单后的首个可成交报价',E100:'延迟100ms',E300:'延迟300ms'})[id]||id||'—';
+  return ({E0:'紧跟砸单后的首个可成交报价',E50:'延迟50ms',E100:'延迟100ms'})[id]||id||'—';
 }
 function exitLabel(id){
-  const match=/^TP(\d+)-TR(\d+)D(\d+)-H(\d+)-(SLN|SLN(\d+))$/.exec(String(id||''));
+  const match=/^TP(\d+)-TR(\d+)D(\d+)-H(\d+)-(SLN|SLN(\d+))-X(\d+)$/.exec(String(id||''));
   if(!match)return id||'—';
   const stop=match[5]==='SLN'?'无固定止损':`止损-${match[6]}%`;
   const hold=Number(match[4])>=60?`${Number(match[4])/60}分钟`:`${match[4]}秒`;
-  return `5秒内+${match[1]}%止盈 · +${match[2]}%启用移动回撤${match[3]}% · 最长${hold} · ${stop}`;
+  const delay=Number(match[7])?` · 退出延迟${match[7]}ms`:'';
+  return `5秒内+${match[1]}%止盈 · +${match[2]}%启用移动回撤${match[3]}% · 最长${hold} · ${stop}${delay}`;
 }
 function noEntryReasons(r){
   const reasons=[];
@@ -142,13 +146,13 @@ function renderStrategies(){
   const start=(state.strategyPage-1)*PAGE_SIZE;
   const visible=rows.slice(start,start+PAGE_SIZE);
   const body=visible.length?visible.map((r,index)=>{
-    const resolved=r.resolvedEpisodes??r.resolved??0;
-    const sample=resolved<30?'<span class="sample">样本不足</span>':'';
-    const fullLoss=combinedScenario(r.combinedScenarios,-100,0);
+    const terminalEntries=(r.exitFilled??r.resolved??0)+(r.noExit??0);
+    const sample=terminalEntries<30?'<span class="sample">样本不足</span>':'';
+    const fullLoss=fullLossReturn(r);
     const raw=`${r.recoveryProfileId}/${r.entryVariantId}/${r.exitProfileId}`;
-    return `<tr><td title="${html(raw)}"><span class="rank">#${start+index+1}</span><code>${html(signalLabel(r.recoveryProfileId))}</code>${sample}</td>${cell(entryLabel(r.entryVariantId))}${cell(exitLabel(r.exitProfileId))}${cell(`${fmt(r.positionSol,0)} SOL`)}${cell(resolved)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(r.averageNetReturnPct),metric(r.averageNetReturnPct)>0?'good':metric(r.averageNetReturnPct)<0?'bad':'')}${cell(pct(r.medianNetReturnPct))}${cell(noEntryReasons(r))}${cell(noExitReasons(r))}${cell(pct(fullLoss),metric(fullLoss)>0?'good':metric(fullLoss)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="15">暂无达标砸单策略数据</td></tr>';
-  document.querySelector('#strategies').innerHTML='<tr><th>排名 / 砸单桶</th><th>入场</th><th>退出管理</th><th>仓位</th><th>独立已结束事件</th><th>入场率</th><th>退出率</th><th>胜率</th><th>平均净收益</th><th>中位净收益</th><th>NO_ENTRY原因</th><th>NO_EXIT原因</th><th>NO_EXIT全损均值</th><th>PF</th><th>最差5%</th></tr>'+body;
+    return `<tr><td title="${html(raw)}"><span class="rank">#${start+index+1}</span><code>${html(signalLabel(r.recoveryProfileId))}</code>${sample}</td>${cell(entryLabel(r.entryVariantId))}${cell(exitLabel(r.exitProfileId))}${cell(`${fmt(r.positionSol,0)} SOL`)}${cell(r.entryFilled??0)}${cell(terminalEntries)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(r.averageNetReturnPct),metric(r.averageNetReturnPct)>0?'good':metric(r.averageNetReturnPct)<0?'bad':'')}${cell(pct(r.medianNetReturnPct))}${cell(noEntryReasons(r))}${cell(noExitReasons(r))}${cell(pct(fullLoss),metric(fullLoss)>0?'good':metric(fullLoss)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="16">暂无达标砸单策略数据</td></tr>';
+  document.querySelector('#strategies').innerHTML='<tr><th>排名 / 砸单桶</th><th>入场</th><th>退出管理</th><th>仓位</th><th>实际入场</th><th>独立已结束事件</th><th>入场率</th><th>退出率</th><th>胜率</th><th>平均净收益</th><th>中位净收益</th><th>NO_ENTRY原因</th><th>NO_EXIT原因</th><th>NO_EXIT全损均值</th><th>PF</th><th>最差5%</th></tr>'+body;
   pager('#strategy-pager','strategy',state.strategyPage,totalPages,rows.length);
 }
 function renderDumps(result){
@@ -215,7 +219,7 @@ async function refresh(){
         ['已退出胜率',pct(matrix.winRatePct)],
         ['平均净收益',pct(matrix.averageNetReturnPct)],
         ['固定单仓','1 SOL'],
-        ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??972}`],
+        ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??1620}`],
         ['新池RPC补全',lastValue(rpcCalls)],
       ];
       document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
@@ -223,18 +227,19 @@ async function refresh(){
       notices.push('<strong>唯一研究方向：</strong>只监控迁移后的PumpSwap；不限制AGE，砸单≥5 SOL且单次冲击跌幅≥8%才创建策略仓位');
       notices.push('<strong>分桶：</strong>砸单规模5–10、10–25、≥25 SOL × 跌幅8–15%、15–30%、≥30%，共9个信号桶');
       notices.push('<strong>独立加仓：</strong>每次达标砸单都新建独立1 SOL仓位；已有仓位不会被覆盖，每个仓位单独计算入场和退出');
-      notices.push('<strong>入场矩阵：</strong>紧跟砸单后的首个可成交公开报价、延迟100ms、延迟300ms；砸单本身不能作为E0成交价');
-      notices.push('<strong>退出矩阵：</strong>买入后5秒内+5%/+8%/+12%快速止盈；移动止盈测试+8%回撤3%、+12%回撤4%、+16%回撤5%；最长30秒/5分钟，并对比无固定止损与-12%止损');
-      notices.push('<strong>规模：</strong>每个达标砸单测试108个入场×退出组合，9个信号桶合计972个矩阵单元；参数组合数不能当成独立事件数');
+      notices.push('<strong>入场矩阵：</strong>紧跟砸单后的首个可成交公开报价、延迟50ms、延迟100ms；砸单所在交易不能作为入场价');
+      notices.push('<strong>退出矩阵：</strong>触发后必须等待后续交易报价；快速止盈+5%/+8%/+12%，移动止盈+8%回撤3%、+12%回撤4%、+16%回撤5%，最长30秒/5分钟，固定止损-8%/-12%/-18%；无止损仅保留小型对照，并测试100/300ms退出延迟');
+      notices.push(`<strong>规模：</strong>每个达标砸单测试${matrix.strategiesPerDump??180}个入场×退出组合，9个信号桶合计${matrix.totalMatrixCells??1620}个矩阵单元；参数组合数不能当成独立事件数`);
       notices.push('<strong>成本：</strong>直接矩阵默认单边基础费0.000005 SOL、优先费0.0001 SOL、Jito 0；仍计PumpSwap费率和滑点');
       notices.push('<strong>安全边界：</strong>当前仅研究模拟，不读取实盘私钥、不发送交易；Dashboard收益不是实盘成交证明');
       if(metric(matrix.qualifiedEvents)<30)notices.push(`<span class="warning">当前达标独立砸单仅 ${matrix.qualifiedEvents??0} 个，任何胜率和收益都属于小样本</span>`);
+      if(metric(matrix.largestMintSharePct)>15)notices.push(`<span class="warning">单一币种占达标事件 ${pct(matrix.largestMintSharePct)}，样本集中度偏高；分析时需同时查看按币种去重结果</span>`);
       if(healthFresh&&stream.receivesFullTransactionMetadata===false&&metric(stream.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(stream.logStatusJoinRatePct)}，持续偏低时不要据此判断策略</span>`);
       document.querySelector('#research-notice').innerHTML=notices.join(' · ');
       const quoteModel=matrix.quoteModel||null;
       document.querySelector('#quote-model').textContent=quoteModel||'当前报价模型';
       state.cohorts=(summary.directDumpCohorts||[])
-        .filter(row=>quoteModel==null||row.quoteModel===quoteModel);
+        .filter(row=>(quoteModel==null||row.quoteModel===quoteModel)&&metric(row.entryFillRatePct)>0);
       renderStrategies();
     }
     if(dumpResult.status==='fulfilled')renderDumps(dumpResult.value);

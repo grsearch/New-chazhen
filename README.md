@@ -17,13 +17,13 @@
 2. **Slot Assembler**：记录 `slot / transactionIndex / instructionIndex / eventIndex / signature`。
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
 3. **Dump Detector**：PumpSwap 本身是迁移后的 AMM 场所；对所有能重建卖前/卖后储备且产生负冲击的卖单建档，不以AGE、池深、毒性或固定跌幅作为采集门槛。
-4. **Direct Dump Matrix**：按卖出量`5–10 / 10–25 / 25+ SOL`和跌幅`8–15 / 15–30 / 30%+`划分9个互斥桶；所有桶统一研究`1 SOL`，入场延迟为0/100/300ms。砸单交易不能作为成交，E0仍等待之后第一笔严格排序公开储备。
+4. **Direct Dump Matrix**：按卖出量`5–10 / 10–25 / 25+ SOL`和跌幅`8–15 / 15–30 / 30%+`划分9个互斥桶；所有桶统一研究`1 SOL`，入场延迟为0/50/100ms。砸单所在交易不能作为成交，E0仍等待之后第一笔严格排序公开储备。
 5. **Independent Add-On Lots**：同一池后续砸单建立新的独立仓位；旧仓不会因二次砸盘被取消或强制退出，各自维护入场、MFE/MAE、止盈、止损和最长持仓。
-6. **Managed Exit Matrix**：5秒内快速止盈5%/8%/12%，移动止盈使用`激活8%/回撤3%`、`激活12%/回撤4%`或`激活16%/回撤5%`，最长持仓30秒/5分钟，并同时测试无固定止损与-12%固定止损，共36种退出配置。
+6. **Managed Exit Matrix**：5秒内快速止盈5%/8%/12%，移动止盈使用`激活8%/回撤3%`、`激活12%/回撤4%`或`激活16%/回撤5%`，最长持仓30秒/5分钟，主体测试-8%/-12%/-18%固定止损；无止损只保留小型对照，并对代表策略增加100/300ms退出延迟敏感性，共60种退出配置。
 7. **Toxic Flow Features**：Creator、历史毒性钱包、机械上涨和买家集中度只保留为事件特征；不会阻止达标直接砸单进入矩阵。
-8. **Execution Simulator**：每个直接砸单生成`3入场 × 36退出 = 108`个独立模拟；默认只计0.0001 SOL Priority Fee、零Jito Tip和基础费，仍会扣除AMM费、滑点和容量冲击。
+8. **Execution Simulator**：每个直接砸单生成`3入场 × 60退出 = 180`个独立模拟；退出条件只能由当前公开样本触发，成交必须等待之后另一笔严格排序交易，不能使用触发样本自成交。默认只计0.0001 SOL Priority Fee、零Jito Tip和基础费，仍会扣除AMM费、滑点和容量冲击。
 
-程序启动时会清理旧Same-Slot、下一Slot、观察钱包、执行探针和非当前报价模型的派生策略行；砸盘事件本身保留。新矩阵所有仓位统一使用1 SOL，Dashboard只汇总`PUMPSWAP_DIRECT_DUMP_MANAGED_V2`。
+程序启动时会清理旧Same-Slot、下一Slot、观察钱包、执行探针和非当前报价模型的派生策略行；砸盘事件本身保留。新矩阵所有仓位统一使用1 SOL，Dashboard只汇总`PUMPSWAP_DIRECT_DUMP_MANAGED_V3`。
 9. **Research Store / Dashboard**：只把砸盘前5秒及其独立持仓执行窗口写入 SQLite；`NO_ENTRY` 与 `NO_EXIT` 独立保存。真实发送仍硬关闭。
 
 ## 研究线
@@ -51,8 +51,8 @@
 
 全局最大记录跌幅默认为99%；超过40%的事件不再被采集层删除，而是进入`D30`桶并保留数据质量/毒性特征。
 
-每个达标事件测试E0/E100/E300三种入场，以及36种快速止盈、移动止盈、最长持仓和固定止损组合。
-退出条件触发后使用其后的第一笔可观察公开储备报价；超时独立记录为`NO_EXIT`，不会用最后价格伪造成交。
+每个达标事件测试E0/E50/E100三种入场，以及60种快速止盈、移动止盈、最长持仓、固定止损和稀疏退出延迟组合。
+入场可跨Slot，但必须位于砸单之后的交易；退出条件触发后同样等待之后另一笔严格排序交易的公开储备报价。超时独立记录为`NO_EXIT`，不会用触发价格或最后价格伪造成交。
 
 ## 报价与费用口径
 
@@ -66,7 +66,7 @@
 - [PumpSwap 官方 IDL](https://github.com/pump-fun/pump-public-docs/blob/main/idl/pump_amm.json)
 - [动态费用官方说明](https://github.com/pump-fun/pump-public-docs/blob/main/docs/FEE_PROGRAM_README.md)
 
-直接矩阵版本为 `PUMPSWAP_DIRECT_DUMP_MANAGED_V2`：使用每笔事件的有效储备和可执行费率，再叠加配置的买卖滑点、
+直接矩阵版本为 `PUMPSWAP_DIRECT_DUMP_MANAGED_V3`：使用每笔事件的有效储备和可执行费率，再叠加配置的买卖滑点、
 Priority Fee、Jito Tip 与基础交易费。入场前会在加入1 SOL买单后的反事实储备上计算立即卖回的SOL，默认拒绝即时净往返损失超过8%、买入或卖出流动性占用超过10%的仓位。它是事件流可实现性研究模型，不是链上 SDK 的逐指令报价替代品。
 
 旧事件解析没有把多Token交易中的Token Account精确映射到各自PumpSwap事件，可能产生1000倍级价格异常。当前解析版本会标记到每个砸盘事件；程序启动时会删除旧策略派生行，并让Dashboard只读取直接矩阵报价模型。
@@ -127,7 +127,7 @@ systemctl list-timers post-dump-recovery-backup.timer --all
 cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 ```
 
-上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。覆盖率不会用首条到末条记录的简单跨度冒充；导出只报告研究数据状态，实盘决定始终为`TRADING_DISABLED`，最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
+上传包包含24小时窗口数据库、Schema、Manifest、Git提交号和逐文件SHA-256。V3就绪判断只检查当前直接砸单矩阵，包括有效覆盖时长、严格排序覆盖、达标事件/币种数、信号桶覆盖、E0/E50/E100实际入场数、成熟终态率、矩阵完整度、Stream断档和单币集中度；停用的Same-Slot、下一Slot及R2-ABS不再作为门槛。覆盖率不会用首条到末条记录的简单跨度冒充；导出只报告研究数据状态，实盘决定始终为`TRADING_DISABLED`，最终仍需和另一不重合时间窗口交叉验证。上传主文件和校验文件后，
 脚本还会向 COS 查询远端对象，确认存在才记录 `DONE`。旧的本地导出默认保留2天。
 
 ## 程序内置健康检查
@@ -161,7 +161,7 @@ cat /home/ubuntu/New-chazhen/data/exports/last-run.env
 
 程序不再永久保存全部 PumpSwap 成交。Dump Detector 只在内存里保留检测所需的5秒历史；一旦识别到砸盘，才回填该池的砸盘前窗口，并继续保存直接矩阵入场和独立退出所使用的成交。结构化字段默认完整保留，重复的 `raw_json` 默认关闭。
 
-事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；结构化研究结果不自动删除。每个达标砸单固定新增108条直接矩阵模拟，分别对应3种入场和36种独立退出配置。SQLite删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
+事件窗口成交和 Slot 摘要默认保留30天，后台每10分钟分批清理；结构化研究结果不自动删除。每个达标砸单固定新增180条直接矩阵模拟，分别对应3种入场和60种独立退出配置。SQLite删除旧行后会复用空闲页，因此新库会稳定在有限大小，但旧的大文件需要一次性压缩迁移才能立即归还系统盘空间：
 
 ```bash
 node scripts/compact-event-window-db.js \
@@ -179,7 +179,7 @@ node scripts/compact-event-window-db.js \
 - `confirmations`：`DBM-*`直接砸单信号桶及其严格因果入场参考点。
 - `same_slot_observations`、`same_slot_shadow_simulations`、`watched_wallet_trades`、`candidate_excluded_mints`：仅为旧Schema兼容保留，生产启动时清空且不再写入。
 - `execution_probes`：候选首买到达热路径时，临时Keypair在本机真实完成构建、签名和序列化的耗时与负载大小；Slot结束后再校验触发交易是否确为最终链上Rank #1。发送开关受数据库约束只能为0，链上落地和排名明确记录为未发送/不可测。
-- `simulations`：每个直接砸单信号桶、入场延迟和管理型退出组合的请求时间、实际报价时间、Fill、成本与收益；Dashboard只读取`PUMPSWAP_DIRECT_DUMP_MANAGED_V2`。
+- `simulations`：每个直接砸单信号桶、入场延迟和管理型退出组合的请求时间、实际报价时间、Fill、成本与收益；Dashboard只读取`PUMPSWAP_DIRECT_DUMP_MANAGED_V3`。
 - `toxic_wallets`：只由已经结束的历史事件积累，供未来信号使用，避免前视偏差。
 
 ## 当前边界
@@ -191,7 +191,7 @@ node scripts/compact-event-window-db.js \
 - 仅靠事件流无法可靠计算 Top Holder 或钱包关联集群；当前只支持信号前已知的 Creator、配置名单和历史毒性记录。
 - 未使用 RPC 补历史池龄。进程启动前已经存在的池子以“已观察时长下限”表示，因此初期会保守地拒绝池龄门槛。
 - 当前退出报价使用退出时观察到的公开池状态，没有把1 SOL模拟买入后的反事实储备逐笔重放；深度不足的池子可能因此产生偏差，
-  对 5 SOL 影响更明显。V4 已在入场容量检查中正确更新一次买入后的储备，但持仓期间的后续公开成交仍未做完整反事实状态重放；实盘化前必须完成状态化回放。
+  对大仓位影响更明显。V3 已在入场容量检查中正确更新一次买入后的储备，但持仓期间的后续公开成交仍未做完整反事实状态重放；实盘化前必须完成状态化回放。
 - 本项目不包含实盘执行。样本达到分析门槛后，仍需按9个砸单桶、NO_EXIT全损、两个不重合时间窗口、最差5%和Exit Fill Rate进行人工评审；通过也只批准开发发送沙盒，不会自动投入SOL。
 
 ## 检查
@@ -202,4 +202,4 @@ pnpm test
 ```
 
 测试覆盖有效储备、signed virtual reserve、逐笔费用、Token 精度、严格/相关 Slot 标签、
-PumpSwap迁移后全网卖出监控、5 SOL/8%双门槛、9个互斥砸单桶、1 SOL独立加仓、E0/E100/E300入场、48种管理型组合、低Priority/Jito成本、发送硬关闭、异常储备隔离、NO_EXIT全损情景、SQLite批量写入和`NO_EXIT`独立统计。
+PumpSwap迁移后全网卖出监控、5 SOL/8%双门槛、9个互斥砸单桶、1 SOL独立加仓、E0/E50/E100入场、60种管理型退出、严格因果退出成交、低Priority/Jito成本、发送硬关闭、异常储备隔离、NO_EXIT全损情景、SQLite批量写入和`NO_EXIT`独立统计。

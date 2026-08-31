@@ -23,6 +23,17 @@ function strictlyAfter(candidate, reference) {
   return left[0] > right[0] || (left[0] === right[0] && left[1] > right[1]);
 }
 
+function strictlyAfterTransaction(candidate, reference) {
+  const candidateSlot = finiteInteger(candidate?.slot);
+  const referenceSlot = finiteInteger(reference?.slot);
+  if (candidateSlot == null || referenceSlot == null) return null;
+  if (candidateSlot !== referenceSlot) return candidateSlot > referenceSlot;
+  const candidateTransaction = finiteInteger(candidate?.transactionIndex);
+  const referenceTransaction = finiteInteger(reference?.transactionIndex);
+  if (candidateTransaction == null || referenceTransaction == null) return null;
+  return candidateTransaction > referenceTransaction;
+}
+
 class SlotAssembler extends EventEmitter {
   constructor({ retentionSlots = 8 } = {}) {
     super();
@@ -91,4 +102,6 @@ class SlotAssembler extends EventEmitter {
   }
 }
 
-module.exports = { SlotAssembler, strictlyAfter, strictOrderKey };
+module.exports = {
+  SlotAssembler, strictlyAfter, strictlyAfterTransaction, strictOrderKey,
+};

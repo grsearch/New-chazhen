@@ -58,13 +58,17 @@ function dump({ id, signalTrade, sellSol = 5, dropPct = 10 }) {
   };
 }
 
-test('production direct-dump matrix has nine signal buckets and 108 strategies per dump', () => {
+test('production direct-dump V3 matrix has nine signal buckets and 180 strategies per dump', () => {
   assert.equal(productionConfig.dump.profiles[0].id, 'PUMPSWAP-ALL-DUMPS');
   assert.equal(productionConfig.dump.profiles[0].minPoolAgeMs, 0);
   assert.equal(productionConfig.dump.episodeCooldownMs, 0);
   assert.equal(productionConfig.dumpBounceMatrix.signalProfiles.length, 9);
   assert.equal(productionConfig.dumpBounceMatrix.entryVariants.length, 3);
-  assert.equal(productionConfig.dumpBounceMatrix.exitProfiles.length, 36);
+  assert.equal(productionConfig.dumpBounceMatrix.exitProfiles.length, 60);
+  assert.deepEqual(
+    productionConfig.dumpBounceMatrix.entryVariants.map((entry) => entry.id),
+    ['E0', 'E50', 'E100'],
+  );
   assert.deepEqual(
     [...new Set(productionConfig.dumpBounceMatrix.exitProfiles
       .map((profile) => profile.fastTakeProfitPct))],
@@ -76,6 +80,16 @@ test('production direct-dump matrix has nine signal buckets and 108 strategies p
       profile.trailingDrawdownPct,
     ])).entries()],
     [[8, 3], [12, 4], [16, 5]],
+  );
+  assert.deepEqual(
+    [...new Set(productionConfig.dumpBounceMatrix.exitProfiles
+      .map((profile) => profile.stopLossPct))],
+    [-8, -12, -18, null],
+  );
+  assert.deepEqual(
+    [...new Set(productionConfig.dumpBounceMatrix.exitProfiles
+      .map((profile) => profile.exitDelayMs))],
+    [0, 100, 300],
   );
   assert.equal(productionConfig.dumpBounceMatrix.executionOverrides.priorityFeeSol, 0.0001);
   assert.equal(productionConfig.dumpBounceMatrix.executionOverrides.jitoTipSol, 0);
@@ -89,11 +103,12 @@ test('production direct-dump matrix has nine signal buckets and 108 strategies p
   const [confirmation] = matrix.confirm(dump({ id: 'qualified-dump', signalTrade: signal }));
   assert.equal(confirmation.profileId, 'DBM-S-D8');
   assert.deepEqual(confirmation.executionPlan.positionSizesSol, [1]);
-  assert.equal(confirmation.executionPlan.requireStrictlyAfterEntryReference, true);
+  assert.equal(confirmation.executionPlan.requireStrictlyAfterEntryTransaction, true);
+  assert.equal(confirmation.executionPlan.requireStrictlyAfterExitReference, true);
   assert.equal(confirmation.executionPlan.exitOnSecondDump, false);
 
   const simulator = new ExecutionSimulator({ config: productionConfig.execution });
-  assert.equal(simulator.schedule(confirmation).length, 108);
+  assert.equal(simulator.schedule(confirmation).length, 180);
 
   assert.deepEqual(matrix.confirm(dump({
     id: 'below-size', signalTrade: signal, sellSol: 4.99, dropPct: 10,
@@ -101,6 +116,53 @@ test('production direct-dump matrix has nine signal buckets and 108 strategies p
   assert.deepEqual(matrix.confirm(dump({
     id: 'below-impact', signalTrade: signal, sellSol: 5, dropPct: 7.99,
   })), []);
+});
+
+test('managed exit waits for a later transaction and applies profile-specific delay', () => {
+  const matrixConfig = {
+    enabled: true,
+    signalProfiles: [{
+      id: 'DBM-TEST', minSellSol: 0, maxSellSol: Infinity,
+      minDropPct: 0, maxDropPct: Infinity, positionSizesSol: [0.25],
+    }],
+    entryVariants: [{ id: 'E0', kind: 'DELAY', delayMs: 0 }],
+    exitProfiles: [{
+      id: 'TP0-TR100D1-H30-SLN-X100', kind: 'MANAGED', fastTakeProfitPct: 0,
+      fastTakeProfitWindowMs: 5_000, trailingActivationPct: 100,
+      trailingDrawdownPct: 1, maxHoldMs: 30_000, stopLossPct: null,
+      exitDelayMs: 100,
+    }],
+    entryTimeoutMs: 5_000, exitDelayMs: 0, exitTimeoutMs: 1_000, exitGraceMs: 1_000,
+    quoteModel: 'DIRECT_CAUSAL_EXIT_TEST', executionOverrides: {},
+  };
+  const matrix = new DumpBounceMatrix({
+    config: matrixConfig, executionConfig: executionConfig(),
+    dataQualityConfig: qualityConfig(),
+  });
+  const simulator = new ExecutionSimulator({ config: executionConfig() });
+  const signal = trade({ at: 1_000, tx: 1, side: 'SELL', sol: 5, quoteSol: 70, sequence: 40 });
+  const [confirmation] = matrix.confirm(dump({ id: 'causal-exit', signalTrade: signal }));
+  const [simulation] = simulator.schedule(confirmation);
+
+  const entry = trade({ at: 1_010, tx: 2, side: 'BUY', sol: 1, quoteSol: 71, sequence: 41 });
+  simulator.observeTrade(entry);
+  assert.equal(simulation.status, 'OPEN');
+
+  const trigger = trade({ at: 1_020, tx: 3, side: 'BUY', sol: 1, quoteSol: 72, sequence: 42 });
+  simulator.observeTrade(trigger);
+  assert.equal(simulation.status, 'PENDING_EXIT');
+  assert.equal(simulation.requestedExitAtMs, 1_120);
+  assert.equal(simulation.exitSignature, undefined, 'the trigger quote cannot fill the exit');
+
+  simulator.observeTrade(trade({
+    at: 1_120, tx: 3, side: 'BUY', sol: 1, quoteSol: 73, sequence: 43,
+  }));
+  assert.equal(simulation.status, 'PENDING_EXIT', 'a later event in the same transaction is not causal');
+  simulator.observeTrade(trade({
+    at: 1_120, tx: 4, side: 'BUY', sol: 1, quoteSol: 73, sequence: 44,
+  }));
+  assert.equal(simulation.status, 'CLOSED');
+  assert.equal(simulation.exitSignature, 'sig-44');
 });
 
 test('production intake records small impacts and drops above the old 40 percent ceiling', () => {

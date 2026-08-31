@@ -4,7 +4,7 @@ const {
   quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
 } = require('./AmmQuote');
 const { assessTradeDataQuality } = require('./TradeDataQuality');
-const { strictlyAfter } = require('./SlotAssembler');
+const { strictlyAfter, strictlyAfterTransaction } = require('./SlotAssembler');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -173,6 +173,7 @@ class ExecutionSimulator {
           entryLiquidityUsagePct: buy.liquidityUsagePct,
           tokenUnits: buy.tokenUnits,
           entryReserveSource: buy.reserveSource,
+          entryFillReferenceTrade: trade,
           maxExitAtMs: at + this._maxHoldMs(simulation.exitProfile),
           updatedAtMs: at,
         });
@@ -184,8 +185,11 @@ class ExecutionSimulator {
 
       if (simulation.status === 'PENDING_EXIT') {
         if (at < simulation.requestedExitAtMs) continue;
+        const plan = simulation.executionPlan || this.config;
+        if (plan.requireStrictlyAfterExitReference
+          && strictlyAfterTransaction(trade, simulation.exitReferenceTrade) !== true) continue;
         const sell = quoteSell(trade, simulation.tokenUnits, {
-          slippageBps: (simulation.executionPlan || this.config).sellSlippageBps,
+          slippageBps: plan.sellSlippageBps,
         });
         if (!sell.available) continue;
         this._close(simulation, trade, at, sell);
@@ -193,9 +197,13 @@ class ExecutionSimulator {
         continue;
       }
 
-      if (simulation.status !== 'OPEN' || at <= simulation.entryAtMs) continue;
+      if (simulation.status !== 'OPEN') continue;
+      const plan = simulation.executionPlan || this.config;
+      if (plan.requireStrictlyAfterEntryFill) {
+        if (strictlyAfterTransaction(trade, simulation.entryFillReferenceTrade) !== true) continue;
+      } else if (at <= simulation.entryAtMs) continue;
       const sell = quoteSell(trade, simulation.tokenUnits, {
-        slippageBps: (simulation.executionPlan || this.config).sellSlippageBps,
+        slippageBps: plan.sellSlippageBps,
       });
       if (!sell.available) continue;
       const returns = this._returns(simulation, sell.proceedsSol);
@@ -208,8 +216,8 @@ class ExecutionSimulator {
       simulation.updatedAtMs = at;
       const reason = this._exitReason(simulation, recovery, returns.netReturnPct, at);
       if (reason) {
-        this._triggerExit(simulation, reason, at);
-        if (simulation.requestedExitAtMs <= at) {
+        this._triggerExit(simulation, reason, at, trade);
+        if (!plan.requireStrictlyAfterExitReference && simulation.requestedExitAtMs <= at) {
           this._close(simulation, trade, at, sell);
           changed.push(simulation);
           continue;
@@ -257,7 +265,9 @@ class ExecutionSimulator {
   _entryEligible(simulation, trade, at) {
     if (at > simulation.entryDeadlineAtMs) return false;
     const plan = simulation.executionPlan || this.config;
-    if (plan.requireStrictlyAfterEntryReference
+    if (plan.requireStrictlyAfterEntryTransaction
+      && strictlyAfterTransaction(trade, simulation.entryReferenceTrade) !== true) return false;
+    if (!plan.requireStrictlyAfterEntryTransaction && plan.requireStrictlyAfterEntryReference
       && strictlyAfter(trade, simulation.entryReferenceTrade) !== true) return false;
     if (simulation.entryKind === 'NEXT_SLOT') {
       return finite(trade.slot, -Infinity) > finite(simulation.confirmationSlot, Infinity);
@@ -303,14 +313,17 @@ class ExecutionSimulator {
     return null;
   }
 
-  _triggerExit(simulation, reason, at) {
+  _triggerExit(simulation, reason, at, trade = null) {
     const plan = simulation.executionPlan || this.config;
+    const exitDelayMs = finite(simulation.exitProfile.exitDelayMs, finite(plan.exitDelayMs, 0));
     simulation.status = 'PENDING_EXIT';
     simulation.exitReason = reason;
     simulation.exitTriggeredAtMs = at;
+    simulation.exitReferenceTrade = trade;
     simulation.exitTargetAtMs = reason === 'FIXED_HOLD'
-      ? simulation.entryAtMs + simulation.exitProfile.holdMs : at;
-    simulation.requestedExitAtMs = at + finite(plan.exitDelayMs, 0);
+      ? simulation.entryAtMs + simulation.exitProfile.holdMs
+      : (reason === 'MAX_HOLD' ? simulation.maxExitAtMs : at);
+    simulation.requestedExitAtMs = at + exitDelayMs;
     simulation.exitDeadlineAtMs = simulation.requestedExitAtMs
       + finite(plan.exitTimeoutMs, 2_000);
     simulation.updatedAtMs = at;

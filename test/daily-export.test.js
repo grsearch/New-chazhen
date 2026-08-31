@@ -56,7 +56,19 @@ test('daily export keeps a consistent 24-hour research window', () => {
     ) VALUES(?,?,?,?,?,?)
   `);
   confirmation.run('old:R1', 'old', 'R1', startMs + 5, 'STRICT', '{}');
-  confirmation.run('inside:R1', 'inside', 'R1', endMs + 5, 'STRICT', '{}');
+  confirmation.run('inside:DBM-S-D8', 'inside', 'DBM-S-D8', endMs + 5, 'STRICT', '{}');
+  db.prepare(`
+    INSERT INTO simulations(
+      simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
+      entry_kind,entry_delay_ms,exit_profile_id,position_sol,quote_model,status,
+      confirmed_at_ms,entry_at_ms,exit_at_ms,net_return_pct,created_at_ms,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(
+    'inside:simulation', 'inside:DBM-S-D8', 'inside', 'DBM-S-D8', 'E0',
+    'DELAY', 0, 'TP5-TR8D3-H30-SLN-X0', 1,
+    'PUMPSWAP_DIRECT_DUMP_MANAGED_V3', 'CLOSED', endMs + 5, endMs + 10,
+    endMs + 20, 1, endMs + 5, endMs + 20,
+  );
   db.prepare(`
     INSERT INTO same_slot_observations(
       observation_id,episode_id,mint,pool,observed_at_ms,slot,event_index,
@@ -86,9 +98,21 @@ test('daily export keeps a consistent 24-hour research window', () => {
   assert.equal(result.analysisReadiness.schemaVersion, '13');
   assert.deepEqual(result.analysisReadiness.missingColumns, []);
   assert.equal(result.analysisReadiness.status, 'COLLECT_MORE_DATA');
+  assert.equal(result.analysisReadiness.readinessVersion, 3);
   assert.equal(result.analysisReadiness.liveTradingDecision, 'TRADING_DISABLED');
   assert.equal(result.analysisReadiness.ingestion.tradeRowsByMode.UNKNOWN, 1);
-  assert.equal(result.analysisReadiness.ingestion.dumpEpisodesByMode.UNKNOWN, 1);
+  assert.equal(result.analysisReadiness.ingestion.dumpEpisodesByMode.UNKNOWN, 2);
+  assert.equal(result.analysisReadiness.researchModel, 'PUMPSWAP_DIRECT_DUMP_MANAGED_V3');
+  assert.equal(result.analysisReadiness.directDumpMatrix.qualifiedEpisodes, 1);
+  assert.equal(result.analysisReadiness.directDumpMatrix.rows, 1);
+  assert.equal(result.analysisReadiness.directDumpMatrix.expectedRows, 180);
+  assert.ok(result.analysisReadiness.gates.some(
+    (gate) => gate.id === 'DIRECT_V3_QUALIFIED_EPISODES',
+  ));
+  assert.ok(result.analysisReadiness.gates.every(
+    (gate) => !gate.id.includes('SAME_SLOT') && !gate.id.includes('NEXT_SLOT')
+      && !gate.id.includes('R2-ABS'),
+  ));
   assert.equal(result.analysisReadiness.stream.maximumObservedGapMs, 10_000);
   assert.equal(result.analysisReadiness.stream.leadingGapMs, 1_000);
   assert.equal(result.analysisReadiness.stream.internalMissingMs, 5_000);
@@ -99,10 +123,12 @@ test('daily export keeps a consistent 24-hour research window', () => {
   assert.ok(result.analysisReadiness.gates.some((gate) => !gate.passed));
   const exported = new Database(destination, { readonly: true, fileMustExist: true });
   assert.deepEqual(exported.prepare('SELECT signature FROM trades').all(), [{ signature: 'inside-trade' }]);
-  assert.deepEqual(exported.prepare('SELECT episode_id FROM dump_events').all(), [{ episode_id: 'inside' }]);
+  assert.deepEqual(exported.prepare('SELECT episode_id FROM dump_events ORDER BY episode_id').all(), [
+    { episode_id: 'inside' }, { episode_id: 'rug' },
+  ]);
   assert.deepEqual(
     exported.prepare('SELECT confirmation_id FROM confirmations').all(),
-    [{ confirmation_id: 'inside:R1' }],
+    [{ confirmation_id: 'inside:DBM-S-D8' }],
     'confirmation follows the selected dump even when it closes just after the window boundary',
   );
   assert.equal(exported.prepare('SELECT COUNT(*) count FROM same_slot_observations').get().count, 1);

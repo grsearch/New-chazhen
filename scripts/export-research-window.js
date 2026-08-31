@@ -5,7 +5,13 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { PUMP_PARSE_VERSION } = require('../src/core/PumpEventParser');
 
-const MAX_DUMP_DROP_PCT = Number(process.env.SDBR_MAX_DUMP_DROP_PCT || 40);
+const MAX_DUMP_DROP_PCT = Number(process.env.SDBR_MAX_DUMP_DROP_PCT || 99);
+const DIRECT_QUOTE_MODEL = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V3';
+const DIRECT_ENTRY_VARIANTS = Object.freeze(['E0', 'E50', 'E100']);
+const DIRECT_SIGNAL_BUCKETS = 9;
+const DIRECT_EXIT_PROFILES = 60;
+const DIRECT_STRATEGIES_PER_EVENT = DIRECT_ENTRY_VARIANTS.length * DIRECT_EXIT_PROFILES;
+const DIRECT_MATURE_AGE_MS = 333_000;
 const CANDIDATE_PROFILE_ID = 'R2-B10-Q500-V1';
 const CANDIDATE_COHORT_STAGE = 'HOLDOUT_B10_Q500_V1';
 const CANDIDATE_PRIMARY_POSITION_SOL = 1;
@@ -120,6 +126,37 @@ const GO_NO_GO_THRESHOLDS = Object.freeze({
   minimumCausalEpisodesPerProfile: 30,
 });
 
+const DIRECT_GO_NO_GO_THRESHOLDS = Object.freeze({
+  minimumQualifiedEpisodes: 300,
+  minimumQualifiedMints: 150,
+  minimumCoveredSignalBuckets: 6,
+  minimumMatureEpisodesPerCoveredBucket: 20,
+  minimumEntryFilledEpisodesPerVariant: 30,
+  minimumTerminalRowsPct: 95,
+  minimumTradeOrderingCoveragePct: 99,
+  minimumMatrixCompletenessPct: 99.9,
+  maximumLargestMintSharePct: 15,
+});
+
+const DIRECT_ANALYSIS_REQUIRED_COLUMNS = Object.freeze({
+  trades: [
+    'received_at_ms', 'slot', 'transaction_index', 'signature', 'mint', 'pool',
+    'side', 'sol_amount', 'effective_quote_reserves_raw', 'total_fee_bps',
+    'parse_version', 'ingestion_mode',
+  ],
+  slot_summaries: ['first_received_at_ms', 'last_received_at_ms'],
+  dump_events: [
+    'episode_id', 'mint', 'detected_at_ms', 'transaction_index', 'sell_sol',
+    'drop_pct', 'parse_version', 'ingestion_mode',
+  ],
+  confirmations: ['confirmation_id', 'episode_id', 'profile_id', 'confirmed_at_ms'],
+  simulations: [
+    'confirmation_id', 'episode_id', 'recovery_profile_id', 'entry_variant_id', 'exit_profile_id',
+    'quote_model', 'status', 'entry_at_ms', 'requested_exit_at_ms', 'exit_at_ms',
+    'exit_signature', 'exit_quote_lag_ms', 'net_return_pct',
+  ],
+});
+
 function parseArgs(argv) {
   const values = {};
   for (const item of argv) {
@@ -187,7 +224,7 @@ function profitFactor(values) {
   return values.length ? (losses > 0 ? wins / losses : (wins > 0 ? null : 0)) : null;
 }
 
-function researchReadiness(databasePath, startMs, endMs) {
+function legacyResearchReadiness(databasePath, startMs, endMs) {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
     const missingColumns = [];
@@ -709,6 +746,317 @@ function researchReadiness(databasePath, startMs, endMs) {
         .filter((profile) => profile.episodes === 0).map((profile) => profile.profileId),
       gates,
       ...metrics,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function researchReadiness(databasePath, startMs, endMs) {
+  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    const missingColumns = [];
+    for (const [table, required] of Object.entries(DIRECT_ANALYSIS_REQUIRED_COLUMNS)) {
+      const available = new Set(db.prepare(`PRAGMA table_info(${quoteIdentifier(table)})`)
+        .all().map((column) => column.name));
+      for (const column of required) {
+        if (!available.has(column)) missingColumns.push(`${table}.${column}`);
+      }
+    }
+    const schemaVersion = db.prepare(`
+      SELECT value FROM schema_meta WHERE key='schema_version'
+    `).get()?.value || null;
+    const windowMs = endMs - startMs;
+    const windowHours = windowMs / 3_600_000;
+    const requiredCoverageHours = windowHours >= 23 ? 23 : windowHours * 0.95;
+    const emptyStream = {
+      coverageHours: 0, observedSpanHours: 0, coveragePct: 0,
+      maximumObservedGapMs: null, leadingGapMs: windowMs, trailingGapMs: 0,
+      internalMissingMs: 0, significantGapCount: 0,
+      gapToleranceMs: STREAM_GAP_TOLERANCE_MS, slotSummaries: 0,
+    };
+    const emptyDirect = {
+      quoteModel: DIRECT_QUOTE_MODEL,
+      qualifiedEpisodes: 0, qualifiedMints: 0, rows: 0, expectedRows: 0,
+      matrixCompletenessPct: null, matureRows: 0, terminalRows: 0,
+      terminalRowsPct: null, entryFilledRows: 0, closedRows: 0,
+      noEntryRows: 0, noExitRows: 0, coveredSignalBuckets: 0,
+      largestMintEpisodes: 0, largestMintSharePct: null,
+      buckets: [], entryVariants: [],
+    };
+    let stream = emptyStream;
+    let direct = emptyDirect;
+    let ingestion = { tradeRowsByMode: {}, dumpEpisodesByMode: {} };
+    let tradeOrderingCoveragePct = null;
+
+    if (!missingColumns.length) {
+      const streamRow = db.prepare(`
+        WITH ordered AS (
+          SELECT first_received_at_ms,last_received_at_ms,
+            LAG(last_received_at_ms) OVER (ORDER BY first_received_at_ms) previous_at_ms
+          FROM slot_summaries
+        )
+        SELECT COUNT(*) slot_summaries,MIN(first_received_at_ms) first_at_ms,
+          MAX(last_received_at_ms) last_at_ms,
+          MAX(CASE WHEN previous_at_ms IS NOT NULL
+            THEN MAX(0,first_received_at_ms-previous_at_ms) END) maximum_observed_gap_ms,
+          SUM(CASE WHEN previous_at_ms IS NOT NULL
+            THEN MAX(0,first_received_at_ms-previous_at_ms-${STREAM_GAP_TOLERANCE_MS})
+            ELSE 0 END) internal_missing_ms,
+          SUM(CASE WHEN previous_at_ms IS NOT NULL
+            AND first_received_at_ms-previous_at_ms>${STREAM_GAP_TOLERANCE_MS}
+            THEN 1 ELSE 0 END) significant_gap_count
+        FROM ordered
+      `).get();
+      const firstAtMs = Number.isFinite(streamRow.first_at_ms) ? streamRow.first_at_ms : null;
+      const lastAtMs = Number.isFinite(streamRow.last_at_ms) ? streamRow.last_at_ms : null;
+      const leadingGapMs = firstAtMs == null ? windowMs : Math.max(0, firstAtMs - startMs);
+      const trailingGapMs = lastAtMs == null ? 0 : Math.max(0, endMs - lastAtMs);
+      const internalMissingMs = Math.max(0, Number(streamRow.internal_missing_ms) || 0);
+      const effectiveCoverageMs = firstAtMs == null || lastAtMs == null
+        ? 0 : Math.max(0, windowMs - leadingGapMs - trailingGapMs - internalMissingMs);
+      stream = {
+        coverageHours: effectiveCoverageMs / 3_600_000,
+        observedSpanHours: firstAtMs == null || lastAtMs == null
+          ? 0 : Math.max(0, lastAtMs - firstAtMs) / 3_600_000,
+        coveragePct: percentage(effectiveCoverageMs, windowMs),
+        maximumObservedGapMs: streamRow.maximum_observed_gap_ms,
+        leadingGapMs,
+        trailingGapMs,
+        internalMissingMs,
+        significantGapCount: streamRow.significant_gap_count || 0,
+        gapToleranceMs: STREAM_GAP_TOLERANCE_MS,
+        slotSummaries: streamRow.slot_summaries || 0,
+      };
+
+      const tradeOrdering = db.prepare(`
+        SELECT COUNT(*) rows,
+          SUM(CASE WHEN slot IS NOT NULL AND transaction_index IS NOT NULL
+            THEN 1 ELSE 0 END) strict_rows
+        FROM trades
+      `).get();
+      tradeOrderingCoveragePct = percentage(
+        tradeOrdering.strict_rows || 0, tradeOrdering.rows || 0,
+      );
+      ingestion = {
+        tradeRowsByMode: Object.fromEntries(db.prepare(`
+          SELECT COALESCE(ingestion_mode,'UNKNOWN') mode,COUNT(*) count
+          FROM trades GROUP BY COALESCE(ingestion_mode,'UNKNOWN')
+        `).all().map((row) => [row.mode, row.count])),
+        dumpEpisodesByMode: Object.fromEntries(db.prepare(`
+          SELECT COALESCE(ingestion_mode,'UNKNOWN') mode,COUNT(*) count
+          FROM dump_events GROUP BY COALESCE(ingestion_mode,'UNKNOWN')
+        `).all().map((row) => [row.mode, row.count])),
+      };
+
+      const counts = db.prepare(`
+        SELECT COUNT(*) rows,COUNT(DISTINCT s.episode_id) qualified_episodes,
+          COUNT(DISTINCT d.mint) qualified_mints,
+          SUM(CASE WHEN s.entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled_rows,
+          SUM(CASE WHEN s.status='CLOSED' THEN 1 ELSE 0 END) closed_rows,
+          SUM(CASE WHEN s.status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry_rows,
+          SUM(CASE WHEN s.status='NO_EXIT' THEN 1 ELSE 0 END) no_exit_rows,
+          SUM(CASE WHEN c.confirmed_at_ms<=?
+            THEN 1 ELSE 0 END) mature_rows,
+          SUM(CASE WHEN c.confirmed_at_ms<=?
+            AND s.status IN ('CLOSED','NO_ENTRY','NO_EXIT') THEN 1 ELSE 0 END) terminal_rows
+        FROM simulations s
+        JOIN dump_events d ON d.episode_id=s.episode_id
+        JOIN confirmations c ON c.confirmation_id=s.confirmation_id
+        WHERE s.quote_model=?
+      `).get(endMs - DIRECT_MATURE_AGE_MS, endMs - DIRECT_MATURE_AGE_MS,
+        DIRECT_QUOTE_MODEL);
+      const qualifiedEpisodes = counts.qualified_episodes || 0;
+      const expectedRows = qualifiedEpisodes * DIRECT_STRATEGIES_PER_EVENT;
+      const buckets = db.prepare(`
+        SELECT s.recovery_profile_id profileId,
+          COUNT(DISTINCT s.episode_id) episodes,COUNT(DISTINCT d.mint) mints,
+          COUNT(*) rows,
+          COUNT(DISTINCT CASE WHEN c.confirmed_at_ms<=? THEN s.episode_id END)
+            matureEpisodes,
+          SUM(CASE WHEN c.confirmed_at_ms<=? THEN 1 ELSE 0 END) matureRows,
+          SUM(CASE WHEN c.confirmed_at_ms<=?
+            AND s.status IN ('CLOSED','NO_ENTRY','NO_EXIT') THEN 1 ELSE 0 END) terminalRows
+        FROM simulations s
+        JOIN dump_events d ON d.episode_id=s.episode_id
+        JOIN confirmations c ON c.confirmation_id=s.confirmation_id
+        WHERE s.quote_model=?
+        GROUP BY s.recovery_profile_id ORDER BY s.recovery_profile_id
+      `).all(
+        endMs - DIRECT_MATURE_AGE_MS, endMs - DIRECT_MATURE_AGE_MS,
+        endMs - DIRECT_MATURE_AGE_MS, DIRECT_QUOTE_MODEL,
+      ).map((row) => ({
+        ...row,
+        terminalRowsPct: percentage(row.terminalRows || 0, row.matureRows || 0),
+      }));
+      const entryVariants = db.prepare(`
+        SELECT entry_variant_id entryVariantId,COUNT(*) rows,
+          COUNT(DISTINCT episode_id) episodes,
+          COUNT(DISTINCT CASE WHEN entry_at_ms IS NOT NULL THEN episode_id END)
+            entryFilledEpisodes,
+          SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entryFilledRows
+        FROM simulations WHERE quote_model=?
+        GROUP BY entry_variant_id ORDER BY entry_variant_id
+      `).all(DIRECT_QUOTE_MODEL);
+      const mintConcentration = db.prepare(`
+        SELECT d.mint,COUNT(DISTINCT s.episode_id) episodes
+        FROM simulations s JOIN dump_events d ON d.episode_id=s.episode_id
+        WHERE s.quote_model=? GROUP BY d.mint
+        ORDER BY episodes DESC LIMIT 1
+      `).get(DIRECT_QUOTE_MODEL) || {};
+      direct = {
+        quoteModel: DIRECT_QUOTE_MODEL,
+        qualifiedEpisodes,
+        qualifiedMints: counts.qualified_mints || 0,
+        rows: counts.rows || 0,
+        expectedRows,
+        matrixCompletenessPct: percentage(counts.rows || 0, expectedRows),
+        matureRows: counts.mature_rows || 0,
+        terminalRows: counts.terminal_rows || 0,
+        terminalRowsPct: percentage(counts.terminal_rows || 0, counts.mature_rows || 0),
+        entryFilledRows: counts.entry_filled_rows || 0,
+        closedRows: counts.closed_rows || 0,
+        noEntryRows: counts.no_entry_rows || 0,
+        noExitRows: counts.no_exit_rows || 0,
+        coveredSignalBuckets: buckets.filter((row) => row.episodes > 0).length,
+        largestMintEpisodes: mintConcentration.episodes || 0,
+        largestMintSharePct: percentage(
+          mintConcentration.episodes || 0, qualifiedEpisodes,
+        ),
+        buckets,
+        entryVariants,
+      };
+    }
+
+    const coveredBuckets = direct.buckets.filter((bucket) => bucket.episodes > 0);
+    const gates = [
+      {
+        id: 'DIRECT_REQUIRED_SCHEMA_FIELDS', passed: missingColumns.length === 0,
+        actual: missingColumns.length, required: 0,
+      },
+      {
+        id: 'STREAM_COVERAGE_HOURS', passed: stream.coverageHours >= requiredCoverageHours,
+        actual: stream.coverageHours, required: requiredCoverageHours,
+      },
+      {
+        id: 'TRADE_STRICT_ORDERING_COVERAGE_PCT',
+        passed: (tradeOrderingCoveragePct || 0)
+          >= DIRECT_GO_NO_GO_THRESHOLDS.minimumTradeOrderingCoveragePct,
+        actual: tradeOrderingCoveragePct,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumTradeOrderingCoveragePct,
+      },
+      {
+        id: 'DIRECT_V3_QUALIFIED_EPISODES',
+        passed: direct.qualifiedEpisodes
+          >= DIRECT_GO_NO_GO_THRESHOLDS.minimumQualifiedEpisodes,
+        actual: direct.qualifiedEpisodes,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumQualifiedEpisodes,
+      },
+      {
+        id: 'DIRECT_V3_QUALIFIED_MINTS',
+        passed: direct.qualifiedMints >= DIRECT_GO_NO_GO_THRESHOLDS.minimumQualifiedMints,
+        actual: direct.qualifiedMints,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumQualifiedMints,
+      },
+      {
+        id: 'DIRECT_V3_MATRIX_COMPLETENESS_PCT',
+        passed: (direct.matrixCompletenessPct || 0)
+          >= DIRECT_GO_NO_GO_THRESHOLDS.minimumMatrixCompletenessPct,
+        actual: direct.matrixCompletenessPct,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumMatrixCompletenessPct,
+      },
+      {
+        id: 'DIRECT_V3_COVERED_SIGNAL_BUCKETS',
+        passed: direct.coveredSignalBuckets
+          >= DIRECT_GO_NO_GO_THRESHOLDS.minimumCoveredSignalBuckets,
+        actual: direct.coveredSignalBuckets,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumCoveredSignalBuckets,
+      },
+      {
+        id: 'DIRECT_V3_MATURE_EPISODES_PER_COVERED_BUCKET',
+        passed: coveredBuckets.length > 0 && coveredBuckets.every((bucket) => (
+          bucket.matureEpisodes
+            >= DIRECT_GO_NO_GO_THRESHOLDS.minimumMatureEpisodesPerCoveredBucket
+        )),
+        actual: coveredBuckets.length
+          ? Math.min(...coveredBuckets.map((bucket) => bucket.matureEpisodes)) : 0,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumMatureEpisodesPerCoveredBucket,
+      },
+      {
+        id: 'DIRECT_V3_TERMINAL_ROWS_PCT',
+        passed: (direct.terminalRowsPct || 0)
+          >= DIRECT_GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+        actual: direct.terminalRowsPct,
+        required: DIRECT_GO_NO_GO_THRESHOLDS.minimumTerminalRowsPct,
+      },
+      ...DIRECT_ENTRY_VARIANTS.map((entryVariantId) => {
+        const row = direct.entryVariants.find(
+          (candidate) => candidate.entryVariantId === entryVariantId,
+        );
+        return {
+          id: `${entryVariantId}_ENTRY_FILLED_EPISODES`,
+          passed: (row?.entryFilledEpisodes || 0)
+            >= DIRECT_GO_NO_GO_THRESHOLDS.minimumEntryFilledEpisodesPerVariant,
+          actual: row?.entryFilledEpisodes || 0,
+          required: DIRECT_GO_NO_GO_THRESHOLDS.minimumEntryFilledEpisodesPerVariant,
+        };
+      }),
+      {
+        id: 'DIRECT_V3_LARGEST_MINT_SHARE_PCT',
+        passed: direct.largestMintSharePct != null
+          && direct.largestMintSharePct
+            <= DIRECT_GO_NO_GO_THRESHOLDS.maximumLargestMintSharePct,
+        actual: direct.largestMintSharePct,
+        required: `<=${DIRECT_GO_NO_GO_THRESHOLDS.maximumLargestMintSharePct}`,
+      },
+    ];
+    const alerts = [];
+    if (stream.significantGapCount > 0) {
+      alerts.push({
+        id: 'STREAM_GAPS', severity: 'WARNING', count: stream.significantGapCount,
+        missingMs: stream.internalMissingMs,
+      });
+    }
+    if (direct.largestMintSharePct
+      > DIRECT_GO_NO_GO_THRESHOLDS.maximumLargestMintSharePct) {
+      alerts.push({
+        id: 'MINT_CONCENTRATION', severity: 'WARNING',
+        largestMintSharePct: direct.largestMintSharePct,
+      });
+    }
+    if (direct.matrixCompletenessPct != null
+      && direct.matrixCompletenessPct
+        < DIRECT_GO_NO_GO_THRESHOLDS.minimumMatrixCompletenessPct) {
+      alerts.push({
+        id: 'MATRIX_INCOMPLETE', severity: 'ERROR',
+        matrixCompletenessPct: direct.matrixCompletenessPct,
+      });
+    }
+    const ready = gates.every((gate) => gate.passed);
+    return {
+      status: ready ? 'READY_FOR_ANALYSIS' : 'COLLECT_MORE_DATA',
+      readinessVersion: 3,
+      liveTradingDecision: 'TRADING_DISABLED',
+      note: 'Readiness applies only to analysis of the direct V3 matrix; it never enables trading.',
+      schemaVersion,
+      windowHours,
+      researchModel: DIRECT_QUOTE_MODEL,
+      thresholds: {
+        ...DIRECT_GO_NO_GO_THRESHOLDS,
+        requiredCoverageHours,
+        matureEventAgeMs: DIRECT_MATURE_AGE_MS,
+        strategiesPerEvent: DIRECT_STRATEGIES_PER_EVENT,
+      },
+      missingColumns,
+      missingCohorts: DIRECT_ENTRY_VARIANTS.filter((entryVariantId) => (
+        !direct.entryVariants.some((row) => row.entryVariantId === entryVariantId)
+      )),
+      gates,
+      alerts,
+      stream,
+      dataQuality: { tradeOrderingCoveragePct },
+      directDumpMatrix: direct,
+      ingestion,
     };
   } finally {
     db.close();

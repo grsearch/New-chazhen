@@ -145,7 +145,10 @@ function eventConcentrationStats(rows) {
 }
 
 function compareCohortPerformance(left, right) {
-  const metrics = ['winRatePct', 'averageNetReturnPct', 'resolved', 'scheduled'];
+  const metrics = [
+    'noExitFullLossAverageNetReturnPct', 'entryFilled',
+    'averageNetReturnPct', 'resolved', 'scheduled',
+  ];
   for (const metric of metrics) {
     const leftValue = number(left?.[metric]);
     const rightValue = number(right?.[metric]);
@@ -169,7 +172,7 @@ class ResearchStore {
       slotSummaryRetentionMs: 30 * 86_400_000,
       maintenanceIntervalMs: 600_000,
       maintenanceBatchMax: 10_000,
-      maxDumpDropPct: 40,
+      maxDumpDropPct: 99,
       acceptedDumpParseVersion: null,
       sameSlotQuoteModel: null,
       sameSlotPrimaryProfileId: 'R2-B5',
@@ -180,7 +183,10 @@ class ResearchStore {
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
       sameSlotCandidate: { enabled: false },
       maxReportedRecoveryPct: 500,
-      directDumpQuoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2',
+      directDumpQuoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V3',
+      directDumpMatrixMeta: {
+        signalBuckets: 9, entryVariants: 3, exitProfiles: 60,
+      },
       ...config,
     };
     if (this.config.dbPath !== ':memory:') {
@@ -1420,9 +1426,14 @@ class ResearchStore {
         simulations: this.db.prepare('DELETE FROM simulations WHERE quote_model<>?')
           .run(model).changes,
       };
-      removed.confirmations = this.db.prepare(
-        "DELETE FROM confirmations WHERE profile_id NOT LIKE 'DBM-%'",
-      ).run().changes;
+      removed.confirmations = this.db.prepare(`
+        DELETE FROM confirmations
+        WHERE profile_id NOT LIKE 'DBM-%'
+          OR NOT EXISTS (
+            SELECT 1 FROM simulations s
+            WHERE s.confirmation_id=confirmations.confirmation_id AND s.quote_model=?
+          )
+      `).run(model).changes;
       return removed;
     })();
   }
@@ -1449,17 +1460,35 @@ class ResearchStore {
       SELECT episode_id episodeId,net_return_pct
       FROM simulations WHERE quote_model=? AND status='CLOSED'
     `).all(model);
+    const mintConcentration = this.db.prepare(`
+      SELECT d.mint,COUNT(DISTINCT s.episode_id) episodes
+      FROM simulations s JOIN dump_events d ON d.episode_id=s.episode_id
+      WHERE s.quote_model=? GROUP BY d.mint ORDER BY episodes DESC LIMIT 1
+    `).get(model) || {};
+    const qualifiedMints = this.db.prepare(`
+      SELECT COUNT(DISTINCT d.mint) count
+      FROM simulations s JOIN dump_events d ON d.episode_id=s.episode_id
+      WHERE s.quote_model=?
+    `).get(model)?.count || 0;
+    const meta = this.config.directDumpMatrixMeta || {};
+    const signalBuckets = Number(meta.signalBuckets) || 9;
+    const entryVariants = Number(meta.entryVariants) || 3;
+    const exitProfiles = Number(meta.exitProfiles) || 60;
     return {
       quoteModel: model,
       minimumSellSol: 5,
       minimumDropPct: 8,
       positionSol: 1,
-      signalBuckets: 9,
-      entryVariants: 3,
-      exitProfiles: 36,
-      strategiesPerDump: 108,
-      totalMatrixCells: 972,
+      signalBuckets,
+      entryVariants,
+      exitProfiles,
+      strategiesPerDump: entryVariants * exitProfiles,
+      totalMatrixCells: signalBuckets * entryVariants * exitProfiles,
       qualifiedEvents: counts.qualified_events || 0,
+      qualifiedMints,
+      largestMintEpisodes: mintConcentration.episodes || 0,
+      largestMintSharePct: counts.qualified_events
+        ? (mintConcentration.episodes || 0) / counts.qualified_events * 100 : null,
       observedCohorts: counts.observed_cohorts || 0,
       scheduled: counts.scheduled || 0,
       entryFilled: counts.entry_filled || 0,
@@ -2133,6 +2162,18 @@ class ResearchStore {
         && row.entry_variant_id === group.entry_variant_id
         && row.position_sol === group.position_sol
         && row.exit_profile_id === group.exit_profile_id);
+      const scenarios = shadowScenarioStats({
+        closedRows: rows,
+        noExit: group.no_exit || 0,
+        noExitLossPcts: this.config.sameSlotNoExitScenarioLossPcts,
+        jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
+        positionSol: group.position_sol,
+        modeledTipSol: 0,
+      });
+      const noExitFullLossAverageNetReturnPct = scenarios.combinedScenarios.find(
+        (scenario) => Number(scenario.noExitLossPct) === -100
+          && Number(scenario.tipSol) === 0,
+      )?.averageNetReturnPct ?? null;
       return {
         quoteModel: group.quote_model,
         recoveryProfileId: group.recovery_profile_id,
@@ -2140,6 +2181,9 @@ class ResearchStore {
         positionSol: group.position_sol,
         exitProfileId: group.exit_profile_id,
         scheduled: group.scheduled,
+        entryFilled: group.entry_filled || 0,
+        exitFilled: group.exit_filled || 0,
+        noExit: group.no_exit || 0,
         entryFillRatePct: group.scheduled ? group.entry_filled / group.scheduled * 100 : null,
         exitFillRatePct: group.entry_filled ? group.exit_filled / group.entry_filled * 100 : null,
         noExitRatePct: group.entry_filled ? group.no_exit / group.entry_filled * 100 : null,
@@ -2153,14 +2197,8 @@ class ResearchStore {
         noCausalEntryQuote: group.no_causal_entry_quote || 0,
         ...returnStats(rows),
         ...eventConcentrationStats(rows),
-        ...shadowScenarioStats({
-          closedRows: rows,
-          noExit: group.no_exit || 0,
-          noExitLossPcts: this.config.sameSlotNoExitScenarioLossPcts,
-          jitoTipScenariosSol: this.config.sameSlotJitoTipScenariosSol,
-          positionSol: group.position_sol,
-          modeledTipSol: 0,
-        }),
+        ...scenarios,
+        noExitFullLossAverageNetReturnPct,
       };
     }).sort(compareCohortPerformance);
   }

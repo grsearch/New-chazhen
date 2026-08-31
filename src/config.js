@@ -57,28 +57,50 @@ function managedExitMatrix() {
     { activationPct: 16, drawdownPct: 5 },
   ];
   const maxHoldMsValues = [30_000, 300_000];
-  const stopLossPcts = [null, -12];
+  const stopLossPcts = [-8, -12, -18];
+  const pushProfile = ({ takeProfitPct, trailing, maxHoldMs, stopLossPct, exitDelayMs }) => {
+    profiles.push(Object.freeze({
+      id: [
+        `TP${idNumber(takeProfitPct)}`,
+        `TR${idNumber(trailing.activationPct)}D${idNumber(trailing.drawdownPct)}`,
+        `H${maxHoldMs / 1_000}`,
+        stopLossPct == null ? 'SLN' : `SL${idNumber(stopLossPct)}`,
+        `X${exitDelayMs}`,
+      ].join('-'),
+      kind: 'MANAGED',
+      fastTakeProfitPct: takeProfitPct,
+      fastTakeProfitWindowMs: 5_000,
+      trailingActivationPct: trailing.activationPct,
+      trailingDrawdownPct: trailing.drawdownPct,
+      maxHoldMs,
+      stopLossPct,
+      exitDelayMs,
+    }));
+  };
   for (const takeProfitPct of takeProfitPcts) {
     for (const trailing of trailingProfiles) {
       for (const maxHoldMs of maxHoldMsValues) {
         for (const stopLossPct of stopLossPcts) {
-          profiles.push(Object.freeze({
-            id: [
-              `TP${idNumber(takeProfitPct)}`,
-              `TR${idNumber(trailing.activationPct)}D${idNumber(trailing.drawdownPct)}`,
-              `H${maxHoldMs / 1_000}`,
-              stopLossPct == null ? 'SLN' : `SL${idNumber(stopLossPct)}`,
-            ].join('-'),
-            kind: 'MANAGED',
-            fastTakeProfitPct: takeProfitPct,
-            fastTakeProfitWindowMs: 5_000,
-            trailingActivationPct: trailing.activationPct,
-            trailingDrawdownPct: trailing.drawdownPct,
-            maxHoldMs,
-            stopLossPct,
-          }));
+          pushProfile({
+            takeProfitPct, trailing, maxHoldMs, stopLossPct, exitDelayMs: 0,
+          });
         }
       }
+    }
+  }
+  // Keep no-stop as a small control instead of multiplying it through the full
+  // grid. Add explicit reaction-latency sensitivity to one representative plan.
+  const baselineTrailing = trailingProfiles[0];
+  for (const maxHoldMs of maxHoldMsValues) {
+    pushProfile({
+      takeProfitPct: 5, trailing: baselineTrailing, maxHoldMs,
+      stopLossPct: null, exitDelayMs: 0,
+    });
+    for (const exitDelayMs of [100, 300]) {
+      pushProfile({
+        takeProfitPct: 5, trailing: baselineTrailing, maxHoldMs,
+        stopLossPct: -12, exitDelayMs,
+      });
     }
   }
   return Object.freeze(profiles);
@@ -294,15 +316,15 @@ const config = {
     signalProfiles: dumpSignalMatrix(),
     entryVariants: Object.freeze([
       Object.freeze({ id: 'E0', kind: 'DELAY', delayMs: 0 }),
+      Object.freeze({ id: 'E50', kind: 'DELAY', delayMs: 50 }),
       Object.freeze({ id: 'E100', kind: 'DELAY', delayMs: 100 }),
-      Object.freeze({ id: 'E300', kind: 'DELAY', delayMs: 300 }),
     ]),
     exitProfiles: managedExitMatrix(),
     entryTimeoutMs: integer('SDBR_DUMP_MATRIX_ENTRY_TIMEOUT_MS', 5_000, { min: 250 }),
     exitDelayMs: integer('SDBR_DUMP_MATRIX_EXIT_DELAY_MS', 0, { min: 0 }),
     exitTimeoutMs: integer('SDBR_DUMP_MATRIX_EXIT_TIMEOUT_MS', 3_000, { min: 100 }),
     exitGraceMs: integer('SDBR_DUMP_MATRIX_EXIT_GRACE_MS', 30_000, { min: 0 }),
-    quoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2',
+    quoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V3',
     executionOverrides: Object.freeze({
       baseTxFeeSol: number('SDBR_DUMP_MATRIX_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),
       priorityFeeSol: number('SDBR_DUMP_MATRIX_PRIORITY_FEE_SOL', 0.0001, { min: 0 }),

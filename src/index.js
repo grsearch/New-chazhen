@@ -24,6 +24,11 @@ async function main() {
     sameSlotCandidate: config.sameSlotShadow.candidate,
     maxReportedRecoveryPct: config.recovery.maxReportedRecoveryPct,
     directDumpQuoteModel: config.dumpBounceMatrix.quoteModel,
+    directDumpMatrixMeta: {
+      signalBuckets: config.dumpBounceMatrix.signalProfiles.length,
+      entryVariants: config.dumpBounceMatrix.entryVariants.length,
+      exitProfiles: config.dumpBounceMatrix.exitProfiles.length,
+    },
   });
   const removedLegacyStrategyData = store.deleteLegacyStrategyData(
     config.dumpBounceMatrix.quoteModel,

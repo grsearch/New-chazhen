@@ -706,7 +706,7 @@ test('invalid V1/V2/V3 simulations can be removed without deleting V4 research d
 });
 
 test('direct-only cleanup removes retired strategy rows and preserves the managed matrix', () => {
-  const directModel = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2';
+  const directModel = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V3';
   const store = new ResearchStore({
     dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
     directDumpQuoteModel: directModel,
@@ -723,6 +723,7 @@ test('direct-only cleanup removes retired strategy rows and preserves the manage
     ) VALUES(?,?,?,?,?,'{}')
   `);
   confirmation.run('direct-confirmation', 'episode', 'DBM-S-D8', 1, 'STRICT');
+  confirmation.run('old-direct-confirmation', 'episode', 'DBM-M-D15', 1, 'STRICT');
   confirmation.run('legacy-confirmation', 'episode', 'N1-FB', 1, 'STRICT');
   const simulation = store.db.prepare(`
     INSERT INTO simulations(
@@ -733,7 +734,7 @@ test('direct-only cleanup removes retired strategy rows and preserves the manage
   `);
   simulation.run(
     'direct', 'direct-confirmation', 'episode', 'DBM-S-D8', 'E0', 'DELAY', 0,
-    'TP5-TR8D3-H30-SLN', 1, directModel, 'CLOSED', 1, 2, 5, 1, 3,
+    'TP5-TR8D3-H30-SLN-X0', 1, directModel, 'CLOSED', 1, 2, 5, 1, 3,
   );
   simulation.run(
     'legacy', 'legacy-confirmation', 'episode', 'N1-FB', 'E100', 'DELAY', 100,
@@ -753,12 +754,16 @@ test('direct-only cleanup removes retired strategy rows and preserves the manage
 
   const removed = store.deleteLegacyStrategyData(directModel);
   assert.equal(removed.simulations, 1);
-  assert.equal(removed.confirmations, 1);
+  assert.equal(removed.confirmations, 2);
   assert.equal(removed.watchedWalletTrades, 1);
   assert.equal(removed.sameSlotObservations, 1);
   assert.deepEqual(
     store.db.prepare('SELECT simulation_id FROM simulations').all(),
     [{ simulation_id: 'direct' }],
+  );
+  assert.deepEqual(
+    store.db.prepare('SELECT confirmation_id FROM confirmations').all(),
+    [{ confirmation_id: 'direct-confirmation' }],
   );
   const summary = store.summary();
   assert.equal(summary.directDumpMatrix.qualifiedEvents, 1);

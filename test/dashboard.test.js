@@ -10,14 +10,23 @@ const {
 } = require('../src/data/ResearchStore');
 const { DashboardServer } = require('../src/server/DashboardServer');
 
-test('cohorts sort by win rate and then average net return', () => {
-  const highWin = { winRatePct: 80, averageNetReturnPct: 1, resolved: 10, scheduled: 10 };
-  const highReturn = { winRatePct: 70, averageNetReturnPct: 50, resolved: 10, scheduled: 10 };
-  assert.ok(compareCohortPerformance(highWin, highReturn) < 0, 'win rate is the primary sort');
+test('cohorts sort by conservative full-loss return and then actual entries', () => {
+  const highWin = {
+    winRatePct: 80, averageNetReturnPct: 1, resolved: 10, scheduled: 10,
+    entryFilled: 10, noExitFullLossAverageNetReturnPct: -20,
+  };
+  const highReturn = {
+    winRatePct: 70, averageNetReturnPct: 50, resolved: 10, scheduled: 10,
+    entryFilled: 10, noExitFullLossAverageNetReturnPct: -10,
+  };
+  assert.ok(compareCohortPerformance(highWin, highReturn) > 0,
+    'the less negative full-loss result is primary');
   assert.ok(compareCohortPerformance(
-    { ...highWin, averageNetReturnPct: 5 }, highWin,
-  ) < 0, 'average return breaks equal-win-rate ties');
-  assert.ok(compareCohortPerformance(highWin, { winRatePct: null, averageNetReturnPct: null }) < 0);
+    { ...highWin, entryFilled: 20 }, highWin,
+  ) < 0, 'actual entries break equal conservative-return ties');
+  assert.ok(compareCohortPerformance(highWin, {
+    noExitFullLossAverageNetReturnPct: null, averageNetReturnPct: null,
+  }) < 0);
   assert.equal(returnStats([]).profitFactor, null, 'PF is unknown when no trade has closed');
   const eventStats = eventConcentrationStats([
     { episodeId: 'winner', net_return_pct: 10 },
@@ -49,17 +58,17 @@ test('dashboard only exposes the direct-dump managed matrix', () => {
   assert.match(source, /砸单≥5 SOL/);
   assert.match(source, /冲击跌幅≥8%/);
   assert.match(source, /每个策略仓位固定1 SOL/);
-  assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V2/);
+  assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V3/);
   assert.match(source, /lastHealth:null/);
   assert.match(source, /healthFresh\?healthResult\.value:state\.lastHealth/);
   assert.match(source, /receivesFullTransactionMetadata===true\?'完整交易':'暂不可用'/);
   assert.doesNotMatch(source, /receivesFullTransactionMetadata===false\?'轻量日志\+排序':'完整交易'/);
   assert.match(source, /pool\.rpcCalls==null\?'—':pool\.rpcCalls/);
-  assert.match(source, /row=>quoteModel==null\|\|row\.quoteModel===quoteModel/);
-  assert.doesNotMatch(source, /filter\(row=>row\.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V2'/);
+  assert.match(source, /quoteModel==null\|\|row\.quoteModel===quoteModel/);
+  assert.doesNotMatch(source, /filter\(row=>row\.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V3'/);
   assert.match(source, /紧跟砸单后的首个可成交报价/);
+  assert.match(source, /延迟50ms/);
   assert.match(source, /延迟100ms/);
-  assert.match(source, /延迟300ms/);
   assert.match(source, /移动回撤/);
   assert.match(source, /最长30秒\/5分钟/);
   assert.match(source, /NO_EXIT全损均值/);
@@ -68,9 +77,11 @@ test('dashboard only exposes the direct-dump managed matrix', () => {
   assert.doesNotMatch(source, /api\/same-slot|api\/watched-wallets/);
   assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
   assert.match(source, /<th>独立已结束事件<\/th>/);
+  assert.match(source, /<th>实际入场<\/th>/);
   assert.match(source, /<th>NO_ENTRY原因<\/th>/);
   assert.match(source, /<th>NO_EXIT原因<\/th>/);
-  assert.match(source, /胜率 ↓ · 平均净收益 ↓/);
+  assert.match(source, /NO_EXIT全损收益 ↓ · 实际入场数 ↓/);
+  assert.match(source, /metric\(row\.entryFillRatePct\)>0/);
   assert.match(source, /https:\/\/gmgn\.ai\/sol\/token\/\$\{encodeURIComponent\(value\)\}/);
   assert.match(source, /target="_blank" rel="noopener noreferrer"/);
 });
