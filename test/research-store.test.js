@@ -706,7 +706,7 @@ test('invalid V1/V2/V3 simulations can be removed without deleting V4 research d
 });
 
 test('direct-only cleanup removes retired strategy rows and preserves the managed matrix', () => {
-  const directModel = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1';
+  const directModel = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2';
   const store = new ResearchStore({
     dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
     directDumpQuoteModel: directModel,
@@ -733,11 +733,11 @@ test('direct-only cleanup removes retired strategy rows and preserves the manage
   `);
   simulation.run(
     'direct', 'direct-confirmation', 'episode', 'DBM-S-D8', 'E0', 'DELAY', 0,
-    'TP3-TR2D1-H30-SLN', 1, directModel, 'CLOSED', 1, 2, 5, 1, 3,
+    'TP5-TR8D3-H30-SLN', 1, directModel, 'CLOSED', 1, 2, 5, 1, 3,
   );
   simulation.run(
     'legacy', 'legacy-confirmation', 'episode', 'N1-FB', 'E100', 'DELAY', 100,
-    'H1', 2, 'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V4', 'NO_ENTRY', 1, null, null, 1, 3,
+    'H1', 2, 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1', 'NO_ENTRY', 1, null, null, 1, 3,
   );
   store.db.prepare(`
     INSERT INTO watched_wallet_trades(

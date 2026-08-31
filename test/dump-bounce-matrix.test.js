@@ -58,13 +58,25 @@ function dump({ id, signalTrade, sellSol = 5, dropPct = 10 }) {
   };
 }
 
-test('production direct-dump matrix has nine signal buckets and 48 strategies per dump', () => {
+test('production direct-dump matrix has nine signal buckets and 108 strategies per dump', () => {
   assert.equal(productionConfig.dump.profiles[0].id, 'PUMPSWAP-ALL-DUMPS');
   assert.equal(productionConfig.dump.profiles[0].minPoolAgeMs, 0);
   assert.equal(productionConfig.dump.episodeCooldownMs, 0);
   assert.equal(productionConfig.dumpBounceMatrix.signalProfiles.length, 9);
   assert.equal(productionConfig.dumpBounceMatrix.entryVariants.length, 3);
-  assert.equal(productionConfig.dumpBounceMatrix.exitProfiles.length, 16);
+  assert.equal(productionConfig.dumpBounceMatrix.exitProfiles.length, 36);
+  assert.deepEqual(
+    [...new Set(productionConfig.dumpBounceMatrix.exitProfiles
+      .map((profile) => profile.fastTakeProfitPct))],
+    [5, 8, 12],
+  );
+  assert.deepEqual(
+    [...new Map(productionConfig.dumpBounceMatrix.exitProfiles.map((profile) => [
+      profile.trailingActivationPct,
+      profile.trailingDrawdownPct,
+    ])).entries()],
+    [[8, 3], [12, 4], [16, 5]],
+  );
   assert.equal(productionConfig.dumpBounceMatrix.executionOverrides.priorityFeeSol, 0.0001);
   assert.equal(productionConfig.dumpBounceMatrix.executionOverrides.jitoTipSol, 0);
 
@@ -81,7 +93,7 @@ test('production direct-dump matrix has nine signal buckets and 48 strategies pe
   assert.equal(confirmation.executionPlan.exitOnSecondDump, false);
 
   const simulator = new ExecutionSimulator({ config: productionConfig.execution });
-  assert.equal(simulator.schedule(confirmation).length, 48);
+  assert.equal(simulator.schedule(confirmation).length, 108);
 
   assert.deepEqual(matrix.confirm(dump({
     id: 'below-size', signalTrade: signal, sellSol: 4.99, dropPct: 10,

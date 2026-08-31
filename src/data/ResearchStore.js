@@ -180,7 +180,7 @@ class ResearchStore {
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
       sameSlotCandidate: { enabled: false },
       maxReportedRecoveryPct: 500,
-      directDumpQuoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1',
+      directDumpQuoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2',
       ...config,
     };
     if (this.config.dbPath !== ':memory:') {
@@ -1456,9 +1456,9 @@ class ResearchStore {
       positionSol: 1,
       signalBuckets: 9,
       entryVariants: 3,
-      exitProfiles: 16,
-      strategiesPerDump: 48,
-      totalMatrixCells: 432,
+      exitProfiles: 36,
+      strategiesPerDump: 108,
+      totalMatrixCells: 972,
       qualifiedEvents: counts.qualified_events || 0,
       observedCohorts: counts.observed_cohorts || 0,
       scheduled: counts.scheduled || 0,

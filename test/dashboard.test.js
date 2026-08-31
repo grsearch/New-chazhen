@@ -49,7 +49,7 @@ test('dashboard only exposes the direct-dump managed matrix', () => {
   assert.match(source, /砸单≥5 SOL/);
   assert.match(source, /冲击跌幅≥8%/);
   assert.match(source, /每个策略仓位固定1 SOL/);
-  assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V1/);
+  assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V2/);
   assert.match(source, /紧跟砸单后的首个可成交报价/);
   assert.match(source, /延迟100ms/);
   assert.match(source, /延迟300ms/);

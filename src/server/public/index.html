@@ -58,7 +58,7 @@
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在读取直接砸单矩阵…</section>
   <section class="panel">
-    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 PUMPSWAP_DIRECT_DUMP_MANAGED_V1 · 胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 PUMPSWAP_DIRECT_DUMP_MANAGED_V2 · 胜率 ↓ · 平均净收益 ↓</span></div>
     <div class="table-wrap"><table id="strategies"></table></div><div class="pager" id="strategy-pager"></div>
   </section>
   <section class="panel">
@@ -205,7 +205,7 @@ async function refresh(){
         ['已退出胜率',pct(matrix.winRatePct)],
         ['平均净收益',pct(matrix.averageNetReturnPct)],
         ['固定单仓','1 SOL'],
-        ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??432}`],
+        ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??972}`],
         ['新池RPC补全',pool.rpcCalls??0],
       ];
       document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
@@ -214,14 +214,14 @@ async function refresh(){
       notices.push('<strong>分桶：</strong>砸单规模5–10、10–25、≥25 SOL × 跌幅8–15%、15–30%、≥30%，共9个信号桶');
       notices.push('<strong>独立加仓：</strong>每次达标砸单都新建独立1 SOL仓位；已有仓位不会被覆盖，每个仓位单独计算入场和退出');
       notices.push('<strong>入场矩阵：</strong>紧跟砸单后的首个可成交公开报价、延迟100ms、延迟300ms；砸单本身不能作为E0成交价');
-      notices.push('<strong>退出矩阵：</strong>买入后5秒内+3%/+5%快速止盈，+2%回撤1%或+4%回撤2%的移动止盈，最长30秒/5分钟，并对比无固定止损与-12%止损');
-      notices.push('<strong>规模：</strong>每个达标砸单测试48个入场×退出组合，9个信号桶合计432个矩阵单元；参数组合数不能当成独立事件数');
+      notices.push('<strong>退出矩阵：</strong>买入后5秒内+5%/+8%/+12%快速止盈；移动止盈测试+8%回撤3%、+12%回撤4%、+16%回撤5%；最长30秒/5分钟，并对比无固定止损与-12%止损');
+      notices.push('<strong>规模：</strong>每个达标砸单测试108个入场×退出组合，9个信号桶合计972个矩阵单元；参数组合数不能当成独立事件数');
       notices.push('<strong>成本：</strong>直接矩阵默认单边基础费0.000005 SOL、优先费0.0001 SOL、Jito 0；仍计PumpSwap费率和滑点');
       notices.push('<strong>安全边界：</strong>当前仅研究模拟，不读取实盘私钥、不发送交易；Dashboard收益不是实盘成交证明');
       if(metric(matrix.qualifiedEvents)<30)notices.push(`<span class="warning">当前达标独立砸单仅 ${matrix.qualifiedEvents??0} 个，任何胜率和收益都属于小样本</span>`);
       if(stream.receivesFullTransactionMetadata===false&&metric(stream.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(stream.logStatusJoinRatePct)}，持续偏低时不要据此判断策略</span>`);
       document.querySelector('#research-notice').innerHTML=notices.join(' · ');
-      state.cohorts=(summary.directDumpCohorts||[]).filter(row=>row.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V1');
+      state.cohorts=(summary.directDumpCohorts||[]).filter(row=>row.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V2');
       renderStrategies();
     }
     if(dumpResult.status==='fulfilled')renderDumps(dumpResult.value);

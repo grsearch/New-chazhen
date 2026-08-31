@@ -50,10 +50,11 @@ function idNumber(value) {
 
 function managedExitMatrix() {
   const profiles = [];
-  const takeProfitPcts = [3, 5];
+  const takeProfitPcts = [5, 8, 12];
   const trailingProfiles = [
-    { activationPct: 2, drawdownPct: 1 },
-    { activationPct: 4, drawdownPct: 2 },
+    { activationPct: 8, drawdownPct: 3 },
+    { activationPct: 12, drawdownPct: 4 },
+    { activationPct: 16, drawdownPct: 5 },
   ];
   const maxHoldMsValues = [30_000, 300_000];
   const stopLossPcts = [null, -12];
@@ -301,7 +302,7 @@ const config = {
     exitDelayMs: integer('SDBR_DUMP_MATRIX_EXIT_DELAY_MS', 0, { min: 0 }),
     exitTimeoutMs: integer('SDBR_DUMP_MATRIX_EXIT_TIMEOUT_MS', 3_000, { min: 100 }),
     exitGraceMs: integer('SDBR_DUMP_MATRIX_EXIT_GRACE_MS', 30_000, { min: 0 }),
-    quoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1',
+    quoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V2',
     executionOverrides: Object.freeze({
       baseTxFeeSol: number('SDBR_DUMP_MATRIX_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),
       priorityFeeSol: number('SDBR_DUMP_MATRIX_PRIORITY_FEE_SOL', 0.0001, { min: 0 }),
