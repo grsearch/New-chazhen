@@ -8,6 +8,7 @@ const { SameSlotProbe } = require('./SameSlotProbe');
 const { SameSlotShadowSimulator } = require('./SameSlotShadowSimulator');
 const { DryRunExecutionProbe } = require('./DryRunExecutionProbe');
 const { CausalBackrunConfirmer } = require('./CausalBackrunConfirmer');
+const { DumpBounceMatrix } = require('./DumpBounceMatrix');
 
 class PostDumpRecoveryEngine {
   constructor({ config, store, now = () => Date.now() }) {
@@ -39,6 +40,12 @@ class PostDumpRecoveryEngine {
       executionProbe: this.executionProbe,
       now,
     });
+    this.dumpBounceMatrix = new DumpBounceMatrix({
+      config: config.dumpBounceMatrix || { enabled: false, signalProfiles: [] },
+      executionConfig: config.execution,
+      dataQualityConfig: config.sameSlotShadow || null,
+      now,
+    });
     this.execution = new ExecutionSimulator({ config: config.execution, store, now });
     this.metrics = {
       events: 0,
@@ -50,6 +57,7 @@ class PostDumpRecoveryEngine {
       sameSlotObservations: 0,
       sameSlotShadowUpdates: 0,
       causalBackrunConfirmations: 0,
+      dumpBounceConfirmations: 0,
       researchTradeWrites: 0,
       watchedWalletTrades: 0,
       errors: 0,
@@ -116,6 +124,7 @@ class PostDumpRecoveryEngine {
       this.metrics.confirmations += 1;
     }
 
+    let dumpBounceConfirmations = [];
     if (dump) {
       const preWindowStartMs = dump.detectedAtMs - this.config.dump.preWindowMs;
       const researchTrades = this.dumpDetector.recentTrades(dump.pool, preWindowStartMs);
@@ -123,17 +132,42 @@ class PostDumpRecoveryEngine {
       this.metrics.researchTradeWrites += researchTrades.length;
       const toxic = this.toxicFilter.evaluateDump(dump);
       this.store.insertDump(dump, toxic);
-      const initial = this.recovery.startEpisode(dump, toxic);
-      this.sameSlotProbe.startEpisode(dump);
+      dumpBounceConfirmations = this.dumpBounceMatrix.confirm(dump, toxic);
+      const initial = this.config.recovery?.enabled === false
+        ? null : this.recovery.startEpisode(dump, toxic);
+      if (this.config.sameSlotShadow?.enabled) this.sameSlotProbe.startEpisode(dump);
       this.metrics.sameSlotShadowUpdates += this.sameSlotShadow.startEpisode(dump, toxic).length;
       this.causalBackrun.startEpisode(dump, toxic);
-      this.store.updateDump(initial);
+      if (initial) {
+        this.store.updateDump(initial);
+      } else {
+        this.store.updateDump({
+          episodeId: dump.episodeId,
+          status: dumpBounceConfirmations.length ? 'MATRIX_QUALIFIED' : 'MATRIX_OBSERVED',
+          observedAtMs: dump.detectedAtMs,
+          currentQuoteSol: dump.postQuoteSol,
+          priceBouncePct: 0,
+          maxRecoveryPct: 0,
+          confirmedProfiles: dumpBounceConfirmations.map((row) => row.profileId),
+        });
+      }
       this.metrics.dumps += 1;
       dump.toxic = toxic;
     }
 
     this.execution.observeTrade(event, recoveryResult.updates);
-    return { dump, confirmations: recoveryResult.confirmations };
+    // Direct-dump entries are scheduled only after the dump transaction has
+    // finished updating older lots, so E0 still requires a later public quote.
+    for (const confirmation of dumpBounceConfirmations) {
+      this.store.insertConfirmation(confirmation);
+      this.execution.schedule(confirmation);
+      this.metrics.dumpBounceConfirmations += 1;
+    }
+    return {
+      dump,
+      confirmations: recoveryResult.confirmations,
+      dumpBounceConfirmations,
+    };
   }
 
   advanceTime(now = this.now()) {
@@ -148,7 +182,7 @@ class PostDumpRecoveryEngine {
 
   health() {
     return {
-      mode: 'RESEARCH_ONLY_SAME_SLOT_SHADOW',
+      mode: 'RESEARCH_ONLY_DUMP_BOUNCE_MATRIX',
       sendsTransactions: false,
       ...this.metrics,
       dumpDetector: this.dumpDetector.health(),
@@ -157,6 +191,7 @@ class PostDumpRecoveryEngine {
       sameSlotProbe: this.sameSlotProbe.health(),
       sameSlotShadow: this.sameSlotShadow.health(),
       causalBackrun: this.causalBackrun.health(),
+      dumpBounceMatrix: this.dumpBounceMatrix.health(),
       executionProbe: this.executionProbe.health(),
       execution: this.execution.health(),
     };

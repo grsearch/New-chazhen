@@ -112,8 +112,11 @@ class DumpDetector {
       const poolAgeSource = migrationAt ? 'MIGRATION_EVENT' : 'OBSERVED_LOWER_BOUND';
       const profiles = this.config.profiles.filter((profile) => (
         sellToQuotePct != null
+        && sellSol >= finite(profile.minSellSol, 0)
+        && sellSol < finite(profile.maxSellSol, Infinity)
         && sellToQuotePct >= profile.minSellToQuotePct
         && dropPct >= profile.minDropPct
+        && dropPct < finite(profile.maxDropPct, Infinity)
         && dropPct <= maxDropPct
         && postQuoteSol >= profile.minPostQuoteSol
         && poolAgeMs >= profile.minPoolAgeMs

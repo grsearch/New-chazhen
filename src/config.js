@@ -44,8 +44,68 @@ function numberList(name, fallback, bounds = {}) {
   }))];
 }
 
+function idNumber(value) {
+  return String(value).replace('-', 'N').replace('.', 'P');
+}
+
+function managedExitMatrix() {
+  const profiles = [];
+  const takeProfitPcts = [3, 5];
+  const trailingProfiles = [
+    { activationPct: 2, drawdownPct: 1 },
+    { activationPct: 4, drawdownPct: 2 },
+  ];
+  const maxHoldMsValues = [30_000, 300_000];
+  const stopLossPcts = [null, -12];
+  for (const takeProfitPct of takeProfitPcts) {
+    for (const trailing of trailingProfiles) {
+      for (const maxHoldMs of maxHoldMsValues) {
+        for (const stopLossPct of stopLossPcts) {
+          profiles.push(Object.freeze({
+            id: [
+              `TP${idNumber(takeProfitPct)}`,
+              `TR${idNumber(trailing.activationPct)}D${idNumber(trailing.drawdownPct)}`,
+              `H${maxHoldMs / 1_000}`,
+              stopLossPct == null ? 'SLN' : `SL${idNumber(stopLossPct)}`,
+            ].join('-'),
+            kind: 'MANAGED',
+            fastTakeProfitPct: takeProfitPct,
+            fastTakeProfitWindowMs: 5_000,
+            trailingActivationPct: trailing.activationPct,
+            trailingDrawdownPct: trailing.drawdownPct,
+            maxHoldMs,
+            stopLossPct,
+          }));
+        }
+      }
+    }
+  }
+  return Object.freeze(profiles);
+}
+
+function dumpSignalMatrix() {
+  const sellBands = [
+    { id: 'S', min: 5, max: 10 },
+    { id: 'M', min: 10, max: 25 },
+    { id: 'L', min: 25, max: Infinity },
+  ];
+  const dropBands = [
+    { id: 'D8', min: 8, max: 15 },
+    { id: 'D15', min: 15, max: 30 },
+    { id: 'D30', min: 30, max: Infinity },
+  ];
+  return Object.freeze(sellBands.flatMap((sell) => dropBands.map((drop) => Object.freeze({
+    id: `DBM-${sell.id}-${drop.id}`,
+    minSellSol: sell.min,
+    maxSellSol: sell.max,
+    minDropPct: drop.min,
+    maxDropPct: drop.max,
+    positionSizesSol: Object.freeze([1]),
+  }))));
+}
+
 const positionSizesSol = [1, 2, 5];
-const maxDumpDropPct = number('SDBR_MAX_DUMP_DROP_PCT', 40, { min: 1, max: 99 });
+const maxDumpDropPct = number('SDBR_MAX_DUMP_DROP_PCT', 99, { min: 1, max: 99 });
 const streamToken = process.env.SDBR_GRPC_TOKEN || '';
 const streamMode = (process.env.SDBR_STREAM_MODE || 'logs-status').trim().toLowerCase();
 
@@ -129,18 +189,18 @@ const config = {
   dump: {
     preWindowMs: 5_000,
     priceFreshMs: 5_000,
-    // Parser/signature de-duplication already prevents duplicate events.  A short
-    // cooldown only suppresses repeated parser deliveries, without hiding a
-    // second independent dump from the same mint.
-    episodeCooldownMs: 1_000,
+    // Signature/event de-duplication handles duplicate parser deliveries.  Zero
+    // cooldown preserves every independently ordered PumpSwap sell pressure event.
+    episodeCooldownMs: integer('SDBR_DUMP_EPISODE_COOLDOWN_MS', 0, { min: 0 }),
     stateRetentionMs: 30 * 60_000,
     maxDropPct: maxDumpDropPct,
     profiles: [
-      // Broad research intake.  Quality and toxicity are recorded as features;
-      // they are not allowed to erase the observation before it can be studied.
-      { id: 'D2-P5-Q20-RESEARCH', minSellToQuotePct: 2, minDropPct: 5, minPostQuoteSol: 20, minPoolAgeMs: 0 },
-      { id: 'D5-P15-Q20-A1', minSellToQuotePct: 5, minDropPct: 15, minPostQuoteSol: 20, minPoolAgeMs: 60_000 },
-      { id: 'D10-P25-Q50-A5', minSellToQuotePct: 10, minDropPct: 25, minPostQuoteSol: 50, minPoolAgeMs: 5 * 60_000 },
+      // PumpSwap-only exhaustive intake.  The AMM venue is already post-migration;
+      // age, liquidity and toxicity remain recorded features rather than intake gates.
+      {
+        id: 'PUMPSWAP-ALL-DUMPS', minSellSol: 0, minSellToQuotePct: 0,
+        minDropPct: 0, minPostQuoteSol: 0, minPoolAgeMs: 0,
+      },
     ],
   },
   toxic: {
@@ -159,6 +219,7 @@ const config = {
     ]),
   },
   recovery: {
+    enabled: boolean('SDBR_RECOVERY_RESEARCH_ENABLED', false),
     maxObservationMs: 20_000,
     maxSlotDelta: 40,
     minValidBuySol: number('SDBR_MIN_VALID_BUY_SOL', 0.1, { min: 0.000001 }),
@@ -225,8 +286,30 @@ const config = {
       'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz',
     ])),
   },
+  dumpBounceMatrix: Object.freeze({
+    enabled: boolean('SDBR_DUMP_BOUNCE_MATRIX_ENABLED', true),
+    // Each qualifying dump maps to exactly one size x impact bucket.  Repeated
+    // dumps create independent lots, so later entries never overwrite earlier ones.
+    signalProfiles: dumpSignalMatrix(),
+    entryVariants: Object.freeze([
+      Object.freeze({ id: 'E0', kind: 'DELAY', delayMs: 0 }),
+      Object.freeze({ id: 'E100', kind: 'DELAY', delayMs: 100 }),
+      Object.freeze({ id: 'E300', kind: 'DELAY', delayMs: 300 }),
+    ]),
+    exitProfiles: managedExitMatrix(),
+    entryTimeoutMs: integer('SDBR_DUMP_MATRIX_ENTRY_TIMEOUT_MS', 5_000, { min: 250 }),
+    exitDelayMs: integer('SDBR_DUMP_MATRIX_EXIT_DELAY_MS', 0, { min: 0 }),
+    exitTimeoutMs: integer('SDBR_DUMP_MATRIX_EXIT_TIMEOUT_MS', 3_000, { min: 100 }),
+    exitGraceMs: integer('SDBR_DUMP_MATRIX_EXIT_GRACE_MS', 30_000, { min: 0 }),
+    quoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1',
+    executionOverrides: Object.freeze({
+      baseTxFeeSol: number('SDBR_DUMP_MATRIX_BASE_TX_FEE_SOL', 0.000005, { min: 0 }),
+      priorityFeeSol: number('SDBR_DUMP_MATRIX_PRIORITY_FEE_SOL', 0.0001, { min: 0 }),
+      jitoTipSol: number('SDBR_DUMP_MATRIX_JITO_TIP_SOL', 0, { min: 0 }),
+    }),
+  }),
   sameSlotShadow: {
-    enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', true),
+    enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', false),
     targetRanks: [1, 2],
     primaryProfileId: 'R2-A1',
     primaryCohortStage: 'BROAD_RESEARCH_V1',
@@ -300,7 +383,7 @@ const config = {
     }),
   },
   causalBackrun: Object.freeze({
-    enabled: true,
+    enabled: boolean('SDBR_CAUSAL_BACKRUN_ENABLED', false),
     // Frozen forward-validation cohorts.  These are intentionally not
     // configurable through env vars, so tomorrow's sample cannot be tuned
     // after seeing its outcome.
@@ -340,7 +423,7 @@ const config = {
     quoteModel: 'PUMPSWAP_CAUSAL_BACKRUN_FROZEN_V1',
   }),
   executionProbe: {
-    enabled: true,
+    enabled: boolean('SDBR_EXECUTION_PROBE_ENABLED', false),
     sendEnabled: false,
     model: 'SOLANA_V0_EPHEMERAL_NOOP_V1',
   },
@@ -391,6 +474,12 @@ function validateConfig({ requireStream = true } = {}) {
     errors.push('SDBR_INCLUDE_PUMP_LIFECYCLE must be false in logs-status mode');
   }
   if (!config.execution.positionSizesSol.length) errors.push('at least one position size is required');
+  if (config.dumpBounceMatrix.enabled && !config.dumpBounceMatrix.signalProfiles.length) {
+    errors.push('at least one direct dump signal profile is required');
+  }
+  if (config.dumpBounceMatrix.enabled && !config.dumpBounceMatrix.exitProfiles.length) {
+    errors.push('at least one direct dump exit profile is required');
+  }
   if (!config.sameSlotShadow.positionSizesSol.length) errors.push('at least one Same-Slot position size is required');
   if (config.sameSlotShadow.strongRank2TriggerBuySol
     <= config.sameSlotShadow.minRank2TriggerBuySol) {

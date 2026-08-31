@@ -2,7 +2,7 @@
   "name": "same-slot-dump-backrun-research",
   "version": "2.0.0",
   "private": true,
-  "description": "Research-only Same-Slot Dump Backrun speed and execution study for PumpSwap.",
+  "description": "Research-only post-migration PumpSwap dump-bounce matrix and execution study.",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",

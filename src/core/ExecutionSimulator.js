@@ -4,6 +4,7 @@ const {
   quoteImmediateRoundTrip, quoteSell, transactionFeeSol,
 } = require('./AmmQuote');
 const { assessTradeDataQuality } = require('./TradeDataQuality');
+const { strictlyAfter } = require('./SlotAssembler');
 
 function finite(value, fallback = null) {
   if (value == null || value === '') return fallback;
@@ -106,7 +107,9 @@ class ExecutionSimulator {
       if (!simulation || simulation.dump.mint !== trade.mint) continue;
       const recovery = updatesByEpisode.get(simulation.episodeId);
       if (simulation.status === 'PENDING_ENTRY') {
-        if (recovery?.secondDump || recovery?.status === 'SECOND_DUMP') {
+        const plan = simulation.executionPlan || this.config;
+        if ((recovery?.secondDump || recovery?.status === 'SECOND_DUMP')
+          && plan.invalidatePendingEntryOnSecondDump !== false) {
           this._rejectEntry(simulation, 'RECOVERY_INVALIDATED_BEFORE_ENTRY', at);
           this.metrics.invalidatedBeforeEntry += 1;
           changed.push(simulation);
@@ -123,7 +126,6 @@ class ExecutionSimulator {
             continue;
           }
         }
-        const plan = simulation.executionPlan || this.config;
         const capacity = quoteImmediateRoundTrip(trade, simulation.positionSol, {
           buySlippageBps: plan.buySlippageBps,
           sellSlippageBps: plan.sellSlippageBps,
@@ -254,6 +256,9 @@ class ExecutionSimulator {
 
   _entryEligible(simulation, trade, at) {
     if (at > simulation.entryDeadlineAtMs) return false;
+    const plan = simulation.executionPlan || this.config;
+    if (plan.requireStrictlyAfterEntryReference
+      && strictlyAfter(trade, simulation.entryReferenceTrade) !== true) return false;
     if (simulation.entryKind === 'NEXT_SLOT') {
       return finite(trade.slot, -Infinity) > finite(simulation.confirmationSlot, Infinity);
     }
@@ -270,8 +275,20 @@ class ExecutionSimulator {
 
   _exitReason(simulation, recovery, netReturnPct, at) {
     const profile = simulation.exitProfile;
-    if (recovery?.secondDump) return 'SECOND_DUMP';
+    const plan = simulation.executionPlan || this.config;
+    if (recovery?.secondDump && plan.exitOnSecondDump !== false) return 'SECOND_DUMP';
     if (profile.stopLossPct != null && netReturnPct <= profile.stopLossPct) return 'EXECUTABLE_STOP_LOSS';
+    const heldMs = at - simulation.entryAtMs;
+    if (profile.fastTakeProfitPct != null
+      && heldMs <= finite(profile.fastTakeProfitWindowMs, 5_000)
+      && netReturnPct >= profile.fastTakeProfitPct) {
+      return `FAST_TAKE_PROFIT_${profile.fastTakeProfitPct}`;
+    }
+    if (profile.trailingActivationPct != null && profile.trailingDrawdownPct != null
+      && simulation.mfeNetPct >= profile.trailingActivationPct
+      && netReturnPct <= simulation.mfeNetPct - profile.trailingDrawdownPct) {
+      return `TRAILING_TAKE_PROFIT_${profile.trailingDrawdownPct}`;
+    }
     if (profile.kind === 'RECOVERY' && recovery) {
       const target = simulation.dump.lowPrice
         + (simulation.dump.prePrice - simulation.dump.lowPrice) * profile.recoveryPct / 100;

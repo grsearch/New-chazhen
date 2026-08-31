@@ -1,12 +1,12 @@
-# Same/Next-Slot Dump Absorption Research
+# PumpSwap Post-Migration Dump Bounce Research
 
-这是一个只做研究的 PumpSwap **Same-Slot Dump Backrun** 项目。它从
+这是一个只做研究的 PumpSwap **迁移后砸单反弹** 项目。它从
 [Flow-Acceleration](https://github.com/grsearch/Flow-Acceleration) 的 Pump 事件解析、流式去重、
 储备报价和 SQLite 思路重建而来，但已删除旧 Shadow 策略、LiveTradingManager、Primary 信号、
 旧部署配置和历史数据库代码。
 
-首要目标是研究“大砸单后能否成为同 Slot 第1或第2笔买入，并快速退出”。采集入口改为宽口径，
-并行记录下一 Slot 的首个有效买入、累计吸收、价格反应和买家增长，避免用多个硬门槛提前删除样本。
+首要目标是完整记录 PumpSwap 中可重建负价格冲击的卖单，并研究“砸单后首个可用公开储备买入、
+允许后续砸单独立加仓、每个仓位独立退出”的管理型策略。Same-Slot排名和下一Slot吸收继续作为并行对照。
 
 > 当前代码不会读取实盘私钥，也不会发送交易。新增的测速层只使用进程内临时密钥，真实执行
 > 本地构建、签名和序列化计时；交易不会离开本机，因此不会产生链上落地或排名数据。
@@ -16,22 +16,35 @@
 1. **Stream Ingestion**：默认使用轻量双流：WebSocket只接收PumpSwap事件日志，LaserStream只接收包含`slot / signature / transactionIndex`的交易状态，不再接收完整交易元数据；首次遇到新池时按需读取Pool和Mint账户以补齐Mint与精度。`full-transactions`保留为紧急回退模式。
 2. **Slot Assembler**：记录 `slot / transactionIndex / instructionIndex / eventIndex / signature`。
    没有 `transactionIndex` 时标记为 `SLOT_CORRELATED`，绝不声称存在严格链上先后顺序。
-3. **Dump Detector**：用卖出前 Quote Reserve 比例、Token Reserve 比例、跌幅、剩余流动性和池龄识别砸盘。
-4. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
-5. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；Rank #2按首买占砸盘额的比例标记为`R2-A1/A2/A5`，最低有效首买为`max(0.1 SOL, 砸盘额1%)`。1 SOL测试250/500/1000/2000ms，2/5 SOL只保留250/500ms容量敏感性；所有结果强制标记为不可执行理论成交。
-6. **Frozen Causal Backrun**：`R2-ABS10-V1`与`R2-ABS5-D15-30-V1`只用大砸单后的首笔严格排序公开买单触发。触发成交不能作为入场报价；必须等待触发后50/100/200/400ms或下一Slot的首个公开储备，1 SOL分别测试100/250/500/1000ms退出。
-7. **Toxic Flow Filter**：Creator、历史毒性钱包、机械上涨和买家集中度保留为因果风险特征。研究Shadow可以保留毒性负样本，但冻结因果组只接收非毒性事件。
-8. **N+1 Absorption Milestones**：`N1-FB/N1-A5/N1-P2/N1-B2`分别记录下一Slot首个有效买入、买入额达到砸盘额5%、价格反弹2%和两个独立买家的首次因果时点，并计算0–100吸收评分。
-9. **Execution Simulator**：冻结因果组每个Profile生成20个组合；传统N+1确认最多生成16个组合。等待入场期间出现二次砸盘会立即取消。
+3. **Dump Detector**：PumpSwap 本身是迁移后的 AMM 场所；对所有能重建卖前/卖后储备且产生负冲击的卖单建档，不以AGE、池深、毒性或固定跌幅作为采集门槛。
+4. **Direct Dump Matrix**：按卖出量`5–10 / 10–25 / 25+ SOL`和跌幅`8–15 / 15–30 / 30%+`划分9个互斥桶；所有桶统一研究`1 SOL`，入场延迟为0/100/300ms。砸单交易不能作为成交，E0仍等待之后第一笔严格排序公开储备。
+5. **Independent Add-On Lots**：同一池后续砸单建立新的独立仓位；旧仓不会因二次砸盘被取消或强制退出，各自维护入场、MFE/MAE、止盈、止损和最长持仓。
+6. **Managed Exit Matrix**：5秒内快速止盈3%/5%，移动止盈使用`激活2%/回撤1%`或`激活4%/回撤2%`，最长持仓30秒/5分钟，并同时测试无固定止损与-12%固定止损，共16种退出配置。
+7. **Same-Slot Speed Probe**：记录同 Slot 后续买单的严格链上排名、交易位置、金额和本地接收延迟。
+8. **Same-Slot Shadow Simulator**：分别研究理论 Rank #1 与 Rank #2；Rank #2按首买占砸盘额的比例标记为`R2-A1/A2/A5`，最低有效首买为`max(0.1 SOL, 砸盘额1%)`。所有结果强制标记为不可执行理论成交。
+9. **Frozen Causal Backrun**：保留旧的首买触发组作为速度型对照，不与直接砸单矩阵混合排名。
+10. **Toxic Flow Filter**：Creator、历史毒性钱包、机械上涨和买家集中度保留为研究特征；直接砸单矩阵不会在采集层删除这些负样本。
+11. **N+1 Absorption Milestones**：记录下一Slot首买、累计吸收、价格反应和买家增长，作为更慢确认的对照。
+12. **Execution Simulator**：每个直接砸单桶生成`3入场 × 16退出 = 48`个独立模拟；默认只计0.0001 SOL Priority Fee、零Jito Tip和基础费，仍会扣除AMM费、滑点和容量冲击。
 
-程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；Dashboard 和统计只保留 1/2/5 SOL 研究仓位。砸盘与恢复事件本身不会被删除，但旧价格解析版本只保留供审计，不再进入策略统计。旧 V1/V2/V3 模拟不会与当前 V4 结果混合；历史确认保留，并明确统计为“确认但无有效模拟”。
-10. **Research Store**：只把砸盘前5秒及其 Same-Slot/恢复/执行窗口写入 SQLite；无关的全网逐笔成交只在短时内存窗口中处理。`NO_ENTRY` 与 `NO_EXIT` 独立保存，不编造退出价格。
-11. **Minimal Dashboard**：展示宽口径事件数、吸收评分、Same-Slot排名、冻结因果组、N+1里程碑、退出组合和观察钱包统计。真实发送被硬关闭，因此真实落地与排名样本始终明确显示为0。
-12. **Wallet Research**：默认观察`popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz`在PumpSwap中的买卖、币种和砸盘附近Slot位置。它复用全网PumpSwap程序流，不新增订阅或RPC轮询；可通过`SDBR_WATCH_WALLETS`覆盖或追加地址。
+程序启动时会清理数据库中已经停用的 0.02/0.05/0.1 SOL 历史模拟记录；新矩阵所有仓位统一使用1 SOL。砸盘与恢复事件本身不会被删除，旧模型也不会与新`PUMPSWAP_DIRECT_DUMP_MANAGED_V1`结果混合。
+13. **Research Store / Dashboard**：只把砸盘前5秒及其持仓执行窗口写入 SQLite；`NO_ENTRY` 与 `NO_EXIT` 独立保存。真实发送仍硬关闭。
+14. **Wallet Research**：默认观察`popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz`，作为外部行为参照，不作为直接矩阵的入场前置条件。
 
-## 两条研究线
+## 研究线
 
-### 核心方向：Same-Slot Dump Backrun
+### 核心方向：Direct Dump Managed Matrix
+
+- 采集全集为 PumpSwap 的负冲击卖单；`PUMPSWAP-ALL-DUMPS`不设AGE、最小池深或固定跌幅门槛，默认最大可记录跌幅为99%。
+- 策略矩阵最低研究门槛为卖出5 SOL且冲击8%；低于该门槛仍记录为砸单事件，但不生成仓位矩阵。
+- 9个大小/跌幅桶互斥，一个砸单只进入一个桶，避免同一事件因重叠Profile重复计算仓位。
+- 每次新砸单都是新的lot；加仓是多个独立lot并存，而不是修改旧仓均价。
+- 快速止盈只在入场后5秒内有效；未触发时继续使用移动止盈、可选固定止损和30秒/5分钟最长持仓。
+- E0表示收到砸单后等待下一笔严格因果公开储备立即报价，不把已经执行的砸单成交当作本系统成交。
+- 默认矩阵成本为每笔0.000005 SOL基础费、0.0001 SOL Priority Fee、0 Jito Tip，可分别用`SDBR_DUMP_MATRIX_*_FEE_SOL`覆盖。
+- 旧的Same-Slot Shadow、Frozen Causal Backrun、N+1 Recovery和执行测速默认关闭，避免“全量砸单”入口把并行旧矩阵放大；需要对照时可分别用对应的`SDBR_*_ENABLED`开关恢复。
+
+### 并行对照：Same-Slot Dump Backrun
 
 Dashboard 的 `#1/#2` 表示砸盘后同 Slot 内已经上链的第1/第2笔严格排序买单。当前 LaserStream
 在交易执行后才提供事件，因此这些行只能测量竞争环境和本地观察延迟，不能声称本系统已经能够取得该排名。
@@ -87,17 +100,17 @@ N+1恢复确认必须满足 `slotDelta > 0`。引擎和执行模拟器各自设�
 吸收评分只使用当前时点已经发生的数据：累计买入/砸盘额、价格响应、独立买家、Quote保留、
 净流入、二次砸盘和信号时毒性。评分用于后续分桶比较，不是当前实盘阈值。
 
-## 初始研究组
+## 直接砸单矩阵
 
-Dump 分层：
+信号分层：
 
-| ID | Sell / 卖前 Quote | 跌幅 | 卖后 Quote | 最小池龄 |
-|---|---:|---:|---:|---:|
-| `D2-P5-Q20-RESEARCH` | 2% | 5% | 20 SOL | 0 |
-| `D5-P15-Q20-A1` | 5% | 15% | 20 SOL | 1 分钟 |
-| `D10-P25-Q50-A5` | 10% | 25% | 50 SOL | 5 分钟 |
+| 桶 | 绝对卖出量 | 冲击跌幅 | 研究仓位 |
+|---|---:|---:|---:|
+| `DBM-S-D8/D15/D30` | 5–10 SOL | 8–15 / 15–30 / 30%+ | 1 SOL |
+| `DBM-M-D8/D15/D30` | 10–25 SOL | 8–15 / 15–30 / 30%+ | 1 SOL |
+| `DBM-L-D8/D15/D30` | 25+ SOL | 8–15 / 15–30 / 30%+ | 1 SOL |
 
-全局最大跌幅默认为40%；超过40%的卖单视为RUG/价格数据异常，不建立研究事件，也不进入Same-Slot或恢复收益统计。
+全局最大记录跌幅默认为99%；超过40%的事件不再被采集层直接删除，而是保留给`D15`桶和数据质量/毒性特征审计。
 
 恢复确认：
 
