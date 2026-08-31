@@ -58,7 +58,7 @@
   <section class="cards" id="cards"></section>
   <section class="panel notice" id="research-notice">正在读取直接砸单矩阵…</section>
   <section class="panel">
-    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 PUMPSWAP_DIRECT_DUMP_MANAGED_V2 · 胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 <span id="quote-model">PUMPSWAP_DIRECT_DUMP_MANAGED_V2</span> · 胜率 ↓ · 平均净收益 ↓</span></div>
     <div class="table-wrap"><table id="strategies"></table></div><div class="pager" id="strategy-pager"></div>
   </section>
   <section class="panel">
@@ -68,7 +68,7 @@
 </main>
 <script>
 const PAGE_SIZE=20;
-const state={strategyPage:1,dumpPage:1,cohorts:[]};
+const state={strategyPage:1,dumpPage:1,cohorts:[],lastHealth:null};
 let refreshInFlight=false;
 let refreshQueued=false;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -185,18 +185,28 @@ async function refresh(){
       fetchJson('/api/health'),
     ]);
     const failed=[summaryResult,dumpResult,healthResult].filter(result=>result.status==='rejected').length;
-    const health=healthResult.status==='fulfilled'?healthResult.value:{};
-    const stream=health.stream||{};
-    document.querySelector('#status').textContent=healthResult.status==='fulfilled'
+    const healthFresh=healthResult.status==='fulfilled';
+    if(healthFresh)state.lastHealth=healthResult.value;
+    const health=healthFresh?healthResult.value:state.lastHealth;
+    const healthAvailable=health!=null;
+    const stream=health?.stream||{};
+    document.querySelector('#status').textContent=healthFresh
       ?`研究模式 · ${stream.state||'运行中'} · ${health.runtime?.status||'CHECKING'}${failed?` · ${failed}项暂不可用`:''}`
-      :`研究模式 · 健康状态暂不可用${failed?` · ${failed}项读取失败`:''}`;
+      :`研究模式 · 健康状态暂不可用${healthAvailable?' · 显示上次有效状态':''}${failed?` · ${failed}项读取失败`:''}`;
     if(summaryResult.status==='fulfilled'){
       const summary=summaryResult.value;
       const matrix=summary.directDumpMatrix||{};
-      const pool=health.poolResolver||{};
+      const pool=health?.poolResolver||{};
+      const collectionMode=stream.receivesFullTransactionMetadata===false
+        ?'轻量日志+排序'
+        :stream.receivesFullTransactionMetadata===true?'完整交易':'暂不可用';
+      const lastValue=value=>!healthFresh&&healthAvailable&&value!=='—'
+        ?`${value}（上次）`:value;
+      const joinRate=stream.logStatusJoinRatePct==null?'—':pct(stream.logStatusJoinRatePct);
+      const rpcCalls=pool.rpcCalls==null?'—':pool.rpcCalls;
       const cards=[
-        ['Helius采集',stream.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],
-        ['日志/排序合并率',stream.logStatusJoinRatePct==null?'—':pct(stream.logStatusJoinRatePct)],
+        ['Helius采集',lastValue(collectionMode)],
+        ['日志/排序合并率',lastValue(joinRate)],
         ['全网卖出事件',summary.dumps?.independent??0],
         ['达标砸单',matrix.qualifiedEvents??0],
         ['运行中策略仓位',matrix.active??0],
@@ -206,7 +216,7 @@ async function refresh(){
         ['平均净收益',pct(matrix.averageNetReturnPct)],
         ['固定单仓','1 SOL'],
         ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??972}`],
-        ['新池RPC补全',pool.rpcCalls??0],
+        ['新池RPC补全',lastValue(rpcCalls)],
       ];
       document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
       const notices=[];
@@ -219,9 +229,12 @@ async function refresh(){
       notices.push('<strong>成本：</strong>直接矩阵默认单边基础费0.000005 SOL、优先费0.0001 SOL、Jito 0；仍计PumpSwap费率和滑点');
       notices.push('<strong>安全边界：</strong>当前仅研究模拟，不读取实盘私钥、不发送交易；Dashboard收益不是实盘成交证明');
       if(metric(matrix.qualifiedEvents)<30)notices.push(`<span class="warning">当前达标独立砸单仅 ${matrix.qualifiedEvents??0} 个，任何胜率和收益都属于小样本</span>`);
-      if(stream.receivesFullTransactionMetadata===false&&metric(stream.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(stream.logStatusJoinRatePct)}，持续偏低时不要据此判断策略</span>`);
+      if(healthFresh&&stream.receivesFullTransactionMetadata===false&&metric(stream.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(stream.logStatusJoinRatePct)}，持续偏低时不要据此判断策略</span>`);
       document.querySelector('#research-notice').innerHTML=notices.join(' · ');
-      state.cohorts=(summary.directDumpCohorts||[]).filter(row=>row.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V2');
+      const quoteModel=matrix.quoteModel||null;
+      document.querySelector('#quote-model').textContent=quoteModel||'当前报价模型';
+      state.cohorts=(summary.directDumpCohorts||[])
+        .filter(row=>quoteModel==null||row.quoteModel===quoteModel);
       renderStrategies();
     }
     if(dumpResult.status==='fulfilled')renderDumps(dumpResult.value);

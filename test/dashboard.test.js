@@ -50,6 +50,13 @@ test('dashboard only exposes the direct-dump managed matrix', () => {
   assert.match(source, /冲击跌幅≥8%/);
   assert.match(source, /每个策略仓位固定1 SOL/);
   assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V2/);
+  assert.match(source, /lastHealth:null/);
+  assert.match(source, /healthFresh\?healthResult\.value:state\.lastHealth/);
+  assert.match(source, /receivesFullTransactionMetadata===true\?'完整交易':'暂不可用'/);
+  assert.doesNotMatch(source, /receivesFullTransactionMetadata===false\?'轻量日志\+排序':'完整交易'/);
+  assert.match(source, /pool\.rpcCalls==null\?'—':pool\.rpcCalls/);
+  assert.match(source, /row=>quoteModel==null\|\|row\.quoteModel===quoteModel/);
+  assert.doesNotMatch(source, /filter\(row=>row\.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V2'/);
   assert.match(source, /紧跟砸单后的首个可成交报价/);
   assert.match(source, /延迟100ms/);
   assert.match(source, /延迟300ms/);
