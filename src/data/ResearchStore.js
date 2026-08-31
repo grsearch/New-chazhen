@@ -180,6 +180,7 @@ class ResearchStore {
       sameSlotJitoTipScenariosSol: [0, 0.005, 0.01, 0.02],
       sameSlotCandidate: { enabled: false },
       maxReportedRecoveryPct: 500,
+      directDumpQuoteModel: 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1',
       ...config,
     };
     if (this.config.dbPath !== ':memory:') {
@@ -1405,6 +1406,78 @@ class ResearchStore {
       .run(...models).changes;
   }
 
+  deleteLegacyStrategyData(preserveQuoteModel = this.config.directDumpQuoteModel) {
+    this.flush();
+    const model = String(preserveQuoteModel || '').trim();
+    if (!model) throw new Error('preserveQuoteModel is required');
+    return this.db.transaction(() => {
+      const removed = {
+        executionProbes: this.db.prepare('DELETE FROM execution_probes').run().changes,
+        sameSlotShadow: this.db.prepare('DELETE FROM same_slot_shadow_simulations').run().changes,
+        sameSlotObservations: this.db.prepare('DELETE FROM same_slot_observations').run().changes,
+        watchedWalletTrades: this.db.prepare('DELETE FROM watched_wallet_trades').run().changes,
+        candidateExcludedMints: this.db.prepare('DELETE FROM candidate_excluded_mints').run().changes,
+        simulations: this.db.prepare('DELETE FROM simulations WHERE quote_model<>?')
+          .run(model).changes,
+      };
+      removed.confirmations = this.db.prepare(
+        "DELETE FROM confirmations WHERE profile_id NOT LIKE 'DBM-%'",
+      ).run().changes;
+      return removed;
+    })();
+  }
+
+  directDumpMatrixSummary({ flushPending = true } = {}) {
+    if (flushPending) this.flush();
+    const model = this.config.directDumpQuoteModel;
+    const counts = this.db.prepare(`
+      SELECT COUNT(*) scheduled,
+        COUNT(DISTINCT episode_id) qualified_events,
+        COUNT(DISTINCT recovery_profile_id || ':' || entry_variant_id || ':'
+          || position_sol || ':' || exit_profile_id) observed_cohorts,
+        SUM(CASE WHEN entry_at_ms IS NOT NULL THEN 1 ELSE 0 END) entry_filled,
+        SUM(CASE WHEN status IN ('PENDING_ENTRY','OPEN','PENDING_EXIT') THEN 1 ELSE 0 END)
+          active,
+        SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) closed,
+        SUM(CASE WHEN status='NO_ENTRY' THEN 1 ELSE 0 END) no_entry,
+        SUM(CASE WHEN status='NO_EXIT' THEN 1 ELSE 0 END) no_exit,
+        MIN(created_at_ms) first_created_at_ms,
+        MAX(updated_at_ms) last_updated_at_ms
+      FROM simulations WHERE quote_model=?
+    `).get(model);
+    const returns = this.db.prepare(`
+      SELECT episode_id episodeId,net_return_pct
+      FROM simulations WHERE quote_model=? AND status='CLOSED'
+    `).all(model);
+    return {
+      quoteModel: model,
+      minimumSellSol: 5,
+      minimumDropPct: 8,
+      positionSol: 1,
+      signalBuckets: 9,
+      entryVariants: 3,
+      exitProfiles: 16,
+      strategiesPerDump: 48,
+      totalMatrixCells: 432,
+      qualifiedEvents: counts.qualified_events || 0,
+      observedCohorts: counts.observed_cohorts || 0,
+      scheduled: counts.scheduled || 0,
+      entryFilled: counts.entry_filled || 0,
+      active: counts.active || 0,
+      closed: counts.closed || 0,
+      noEntry: counts.no_entry || 0,
+      noExit: counts.no_exit || 0,
+      entryFillRatePct: counts.scheduled
+        ? counts.entry_filled / counts.scheduled * 100 : null,
+      exitFillRatePct: counts.entry_filled
+        ? counts.closed / counts.entry_filled * 100 : null,
+      coverageHours: counts.first_created_at_ms != null && counts.last_updated_at_ms != null
+        ? (counts.last_updated_at_ms - counts.first_created_at_ms) / 3_600_000 : null,
+      ...returnStats(returns),
+      ...eventConcentrationStats(returns),
+    };
+  }
+
   summary({ flushPending = true } = {}) {
     if (flushPending) this.flush();
     const acceptedVersion = this.config.acceptedDumpParseVersion;
@@ -1732,6 +1805,8 @@ class ResearchStore {
       this.config.maxReportedRecoveryPct);
     const eligibleDumps = Math.max(0, dump.independent - (dump.toxic_rejected || 0));
     const candidateSummary = this.sameSlotCandidateSummary();
+    const cohorts = this.cohorts();
+    const directDumpMatrix = this.directDumpMatrixSummary({ flushPending: false });
     return {
       generatedAtMs: Date.now(),
       dumps: {
@@ -1884,7 +1959,11 @@ class ResearchStore {
         ...returnStats(returns),
         ...eventConcentrationStats(returns),
       },
-      cohorts: this.cohorts(),
+      directDumpMatrix,
+      directDumpCohorts: cohorts.filter(
+        (row) => row.quoteModel === this.config.directDumpQuoteModel,
+      ),
+      cohorts,
       sameSlotShadowCohorts: this.sameSlotShadowCohorts(),
       store: this.health(),
     };
@@ -2294,6 +2373,37 @@ class ResearchStore {
       SELECT * FROM watched_wallet_trades
       ORDER BY received_at_ms DESC LIMIT ? OFFSET ?
     `).all(normalizedSize, (normalizedPage - 1) * normalizedSize);
+    return {
+      items,
+      page: normalizedPage,
+      pageSize: normalizedSize,
+      total,
+      totalPages,
+    };
+  }
+
+  recentDirectDumpsPage(page = 1, pageSize = 20, { flushPending = true } = {}) {
+    if (flushPending) this.flush();
+    const acceptedVersion = this.config.acceptedDumpParseVersion;
+    const normalizedSize = Math.max(1, Math.min(100, Math.trunc(pageSize) || 20));
+    const where = `c.profile_id LIKE 'DBM-%'
+      AND (d.drop_pct IS NULL OR d.drop_pct<=?)
+      AND (? IS NULL OR d.parse_version=?)`;
+    const total = this.db.prepare(`
+      SELECT COUNT(*) count FROM dump_events d
+      JOIN confirmations c ON c.episode_id=d.episode_id
+      WHERE ${where}
+    `).get(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion).count;
+    const totalPages = Math.max(1, Math.ceil(total / normalizedSize));
+    const normalizedPage = Math.max(1, Math.min(totalPages, Math.trunc(page) || 1));
+    const items = this.db.prepare(`
+      SELECT d.*,c.profile_id signal_profile_id
+      FROM dump_events d
+      JOIN confirmations c ON c.episode_id=d.episode_id
+      WHERE ${where}
+      ORDER BY d.detected_at_ms DESC LIMIT ? OFFSET ?
+    `).all(this.config.maxDumpDropPct, acceptedVersion, acceptedVersion,
+      normalizedSize, (normalizedPage - 1) * normalizedSize);
     return {
       items,
       page: normalizedPage,

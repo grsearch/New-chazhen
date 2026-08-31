@@ -111,6 +111,13 @@ class DashboardServer {
           limit, { flushPending: false },
         ));
       }
+      if (url.pathname === '/api/direct-dumps') {
+        return sendJson(response, 200, this.store.recentDirectDumpsPage(
+          Number(url.searchParams.get('page') || 1),
+          Number(url.searchParams.get('pageSize') || 20),
+          { flushPending: false },
+        ));
+      }
       if (url.pathname === '/api/simulations') {
         return sendJson(response, 200, this.store.recentSimulations(
           limit, { flushPending: false },

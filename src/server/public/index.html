@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Same-Slot Dump Backrun Research</title>
+  <title>PumpSwap 砸单反弹矩阵</title>
   <style>
-    :root { color-scheme: dark; --bg:#0b1014; --panel:#121a20; --line:#26333c; --text:#e7eef2; --muted:#8da0ac; --good:#50d890; --bad:#ff6b6b; --accent:#72b7ff; }
+    :root { color-scheme:dark; --bg:#0b1014; --panel:#121a20; --line:#26333c; --text:#e7eef2; --muted:#8da0ac; --good:#50d890; --bad:#ff6b6b; --accent:#72b7ff; --warning:#ffbf69; }
     * { box-sizing:border-box; }
     body { margin:0; font:14px/1.45 Inter,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
-    main { max-width:1440px; margin:auto; padding:24px; }
+    main { max-width:1540px; margin:auto; padding:24px; }
     header { display:flex; justify-content:space-between; gap:16px; align-items:end; margin-bottom:20px; }
     h1 { font-size:24px; margin:0; }
-    h2 { font-size:16px; margin:0 0 12px; }
+    h2 { font-size:16px; margin:0; }
     p { color:var(--muted); margin:6px 0 0; }
     .badge { padding:6px 10px; border:1px solid var(--line); border-radius:999px; color:var(--good); white-space:nowrap; }
     .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:12px; margin-bottom:18px; }
@@ -20,16 +20,20 @@
     .label { color:var(--muted); font-size:12px; }
     .value { font-size:23px; margin-top:5px; font-variant-numeric:tabular-nums; }
     .panel { padding:16px; margin-bottom:18px; overflow:hidden; }
-    .table-wrap { overflow:auto; }
     .panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
-    .panel-head h2 { margin:0; }
     .sort-note { color:var(--muted); font-size:12px; }
+    .table-wrap { overflow:auto; }
     table { width:100%; border-collapse:collapse; white-space:nowrap; }
     th,td { padding:9px 10px; border-bottom:1px solid var(--line); text-align:right; font-variant-numeric:tabular-nums; }
     th:first-child,td:first-child { text-align:left; }
     th { color:var(--muted); font-size:12px; font-weight:500; }
-    .good { color:var(--good); } .bad { color:var(--bad); }
     code { color:var(--accent); }
+    .good { color:var(--good); }
+    .bad { color:var(--bad); }
+    .warning { color:var(--warning); }
+    .notice { color:var(--muted); }
+    .notice strong { color:var(--text); }
+    .sample { margin-left:7px; font-size:11px; color:var(--warning); }
     .token-link { color:var(--accent); text-decoration:none; border-bottom:1px dashed #4b7ead; }
     .token-link:hover { color:#a8d4ff; border-bottom-style:solid; }
     .rank { color:var(--muted); display:inline-block; min-width:30px; }
@@ -39,53 +43,39 @@
     .pager button:disabled { opacity:.35; cursor:not-allowed; }
     .pager-info { min-width:180px; text-align:center; font-variant-numeric:tabular-nums; }
     .empty { color:var(--muted); text-align:center!important; padding:28px!important; }
-    .notice { color:var(--muted); }
-    .notice strong { color:var(--text); }
-    .warning { color:#ffbf69; }
-    .sample { margin-left:7px; font-size:11px; color:#ffbf69; }
-    tr.primary { background:rgba(80,216,144,.07); }
-    @media (max-width:700px) { main{padding:14px} header{align-items:start;flex-direction:column} .panel-head{align-items:start;flex-direction:column}.pager{justify-content:center;flex-wrap:wrap}.pager-info{order:-1;width:100%} }
+    @media (max-width:700px) { main{padding:14px} header,.panel-head{align-items:start;flex-direction:column}.pager{justify-content:center;flex-wrap:wrap}.pager-info{order:-1;width:100%} }
   </style>
 </head>
 <body>
 <main>
   <header>
-    <div><h1>Same/Next-Slot Dump Absorption Research</h1><p>宽口径采集、同Slot第1/第2笔理论入场与下一Slot吸收里程碑并行研究。</p></div>
+    <div>
+      <h1>PumpSwap 迁移后砸单反弹矩阵</h1>
+      <p>全网监控 · AGE不限 · 砸单≥5 SOL · 冲击跌幅≥8% · 每个策略仓位固定1 SOL</p>
+    </div>
     <div class="badge" id="status">读取中</div>
   </header>
   <section class="cards" id="cards"></section>
-  <section class="panel notice" id="research-notice">正在计算独立事件统计…</section>
+  <section class="panel notice" id="research-notice">正在读取直接砸单矩阵…</section>
   <section class="panel">
-    <div class="panel-head"><h2>同 Slot Shadow 组合</h2><span class="sort-note">R2-A1宽口径主研究 · 1 SOL完整退出网格</span></div>
-    <div class="table-wrap"><table id="same-slot-shadow"></table></div><div class="pager" id="same-slot-shadow-pager"></div>
+    <div class="panel-head"><h2>直接砸单策略矩阵</h2><span class="sort-note">仅 PUMPSWAP_DIRECT_DUMP_MANAGED_V1 · 胜率 ↓ · 平均净收益 ↓</span></div>
+    <div class="table-wrap"><table id="strategies"></table></div><div class="pager" id="strategy-pager"></div>
   </section>
   <section class="panel">
-    <div class="panel-head"><h2>核心：Same-Slot 速度与链上排名（当前仅观察）</h2><span class="sort-note">按观察时间从新到旧</span></div>
-    <div class="table-wrap"><table id="same-slot"></table></div><div class="pager" id="same-slot-pager"></div>
-  </section>
-  <section class="panel">
-    <div class="panel-head"><h2>观察钱包 PumpSwap 行为</h2><span class="sort-note">复用现有程序流，不增加Helius订阅</span></div>
-    <div class="table-wrap"><table id="watched-wallets"></table></div><div class="pager" id="watched-wallets-pager"></div>
-  </section>
-  <section class="panel">
-    <div class="panel-head"><h2>对照组：后续Slot恢复策略</h2><span class="sort-note">默认排序：胜率 ↓ · 平均净收益 ↓</span></div>
-    <div class="table-wrap"><table id="cohorts"></table></div><div class="pager" id="cohort-pager"></div>
-  </section>
-  <section class="panel">
-    <div class="panel-head"><h2>最近砸盘事件</h2><span class="sort-note">按检测时间从新到旧</span></div>
+    <div class="panel-head"><h2>最近达标砸单</h2><span class="sort-note">只显示达到5 SOL和8%双门槛的事件</span></div>
     <div class="table-wrap"><table id="dumps"></table></div><div class="pager" id="dump-pager"></div>
   </section>
 </main>
 <script>
 const PAGE_SIZE=20;
-const state={cohortPage:1,shadowPage:1,sameSlotPage:1,walletPage:1,dumpPage:1,cohorts:[],shadowCohorts:[]};
+const state={strategyPage:1,dumpPage:1,cohorts:[]};
 let refreshInFlight=false;
 let refreshQueued=false;
 const html=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt=(v,d=2)=>v==null||!Number.isFinite(Number(v))?'—':Number(v).toFixed(d);
 const pct=v=>v==null||!Number.isFinite(Number(v))?'—':`${fmt(v)}%`;
-const pricePct=v=>v==null||!Number.isFinite(Number(v))?'—':Math.abs(Number(v))>500?'数据异常/旧解析':pct(v);
 const cell=(v,c='')=>`<td class="${c}">${html(v==null?'—':v)}</td>`;
+const metric=v=>v==null||v===''?null:(Number.isFinite(Number(v))?Number(v):null);
 const time=v=>v==null?'—':new Date(v).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
 const mintLink=mint=>{
   const value=String(mint||'');
@@ -93,7 +83,6 @@ const mintLink=mint=>{
   const label=value.length>14?`${value.slice(0,8)}…${value.slice(-4)}`:value;
   return `<a class="token-link" href="https://gmgn.ai/sol/token/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer" title="${html(value)}">${html(label)} ↗</a>`;
 };
-const metric=v=>v==null||v===''?null:(Number.isFinite(Number(v))?Number(v):null);
 const compareMetric=(a,b)=>{
   const left=metric(a),right=metric(b);
   if(left==null&&right==null)return 0;
@@ -103,129 +92,75 @@ const compareMetric=(a,b)=>{
 };
 const compareCohorts=(a,b)=>compareMetric(a.winRatePct,b.winRatePct)
   ||compareMetric(a.averageNetReturnPct,b.averageNetReturnPct)
-  ||compareMetric(a.resolved,b.resolved)||compareMetric(a.scheduled,b.scheduled);
-const noExitReasons=r=>{
+  ||compareMetric(a.resolvedEpisodes??a.resolved,b.resolvedEpisodes??b.resolved)
+  ||compareMetric(a.scheduled,b.scheduled);
+const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
+function pager(id,kind,page,totalPages,total){
+  const first=page<=1?'disabled':'';
+  const last=page>=totalPages?'disabled':'';
+  document.querySelector(id).innerHTML=`<button ${first} onclick="changePage('${kind}',1)">首页</button><button ${first} onclick="changePage('${kind}',${page-1})">上一页</button><span class="pager-info">第 ${page} / ${totalPages} 页 · 共 ${total} 条</span><button ${last} onclick="changePage('${kind}',${page+1})">下一页</button><button ${last} onclick="changePage('${kind}',${totalPages})">末页</button>`;
+}
+function signalLabel(id){
+  const sizes={S:'5–10 SOL',M:'10–25 SOL',L:'≥25 SOL'};
+  const drops={D8:'8–15%',D15:'15–30%',D30:'≥30%'};
+  const match=/^DBM-([SML])-(D8|D15|D30)$/.exec(String(id||''));
+  return match?`${sizes[match[1]]} / 跌${drops[match[2]]}`:(id||'—');
+}
+function entryLabel(id){
+  return ({E0:'紧跟砸单后的首个可成交报价',E100:'延迟100ms',E300:'延迟300ms'})[id]||id||'—';
+}
+function exitLabel(id){
+  const match=/^TP(\d+)-TR(\d+)D(\d+)-H(\d+)-(SLN|SLN(\d+))$/.exec(String(id||''));
+  if(!match)return id||'—';
+  const stop=match[5]==='SLN'?'无固定止损':`止损-${match[6]}%`;
+  const hold=Number(match[4])>=60?`${Number(match[4])/60}分钟`:`${match[4]}秒`;
+  return `5秒内+${match[1]}%止盈 · +${match[2]}%启用移动回撤${match[3]}% · 最长${hold} · ${stop}`;
+}
+function noEntryReasons(r){
+  const reasons=[];
+  if(metric(r.noCausalEntryQuote)>0)reasons.push(`无后续报价 ${r.noCausalEntryQuote}`);
+  if(metric(r.insufficientRoundTripLiquidity)>0)reasons.push(`容量不足 ${r.insufficientRoundTripLiquidity}`);
+  if(metric(r.roundTripCostTooHigh)>0)reasons.push(`往返成本过高 ${r.roundTripCostTooHigh}`);
+  if(metric(r.invalidatedBeforeEntry)>0)reasons.push(`入场前失效 ${r.invalidatedBeforeEntry}`);
+  return reasons.length?reasons.join(' · '):'—';
+}
+function noExitReasons(r){
   const reasons=[];
   if(metric(r.noExitQuote)>0)reasons.push(`无退出报价 ${r.noExitQuote}`);
   if(metric(r.noTradeAfterHorizon)>0)reasons.push(`时间后无交易 ${r.noTradeAfterHorizon}`);
   if(metric(r.noExitOther)>0)reasons.push(`其他 ${r.noExitOther}`);
   return reasons.length?reasons.join(' · '):'—';
-};
-const noEntryReasons=r=>{
-  const reasons=[];
-  if(metric(r.noCausalEntryQuote)>0)reasons.push(`无入场报价 ${r.noCausalEntryQuote}`);
-  if(metric(r.invalidatedBeforeEntry)>0)reasons.push(`恢复失效 ${r.invalidatedBeforeEntry}`);
-  if(metric(r.insufficientRoundTripLiquidity)>0)reasons.push(`容量不足 ${r.insufficientRoundTripLiquidity}`);
-  if(metric(r.roundTripCostTooHigh)>0)reasons.push(`往返成本过高 ${r.roundTripCostTooHigh}`);
-  return reasons.length?reasons.join(' · '):'—';
-};
-const walletLink=wallet=>{
-  const value=String(wallet||'');
-  if(!value)return '—';
-  const label=value.length>14?`${value.slice(0,8)}…${value.slice(-4)}`:value;
-  return `<a class="token-link" href="https://solscan.io/account/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer" title="${html(value)}">${html(label)} ↗</a>`;
-};
-const txLink=signature=>{
-  const value=String(signature||'');
-  if(!value)return '—';
-  return `<a class="token-link" href="https://solscan.io/tx/${encodeURIComponent(value)}" target="_blank" rel="noopener noreferrer">查看 ↗</a>`;
-};
-const scenario=(rows,key,value)=>{
-  const row=(rows||[]).find(item=>Number(item[key])===Number(value));
-  return row?.averageNetReturnPct??null;
-};
-const combinedScenario=(rows,lossPct,tipSol)=>{
-  const row=(rows||[]).find(item=>Number(item.noExitLossPct)===Number(lossPct)
-    &&Number(item.tipSol)===Number(tipSol));
-  return row?.averageNetReturnPct??null;
-};
-const pageCount=total=>Math.max(1,Math.ceil(total/PAGE_SIZE));
-function pager(id,kind,page,totalPages,total){
-  const disabledFirst=page<=1?'disabled':'';
-  const disabledLast=page>=totalPages?'disabled':'';
-  document.querySelector(id).innerHTML=`<button ${disabledFirst} onclick="changePage('${kind}',1)">首页</button><button ${disabledFirst} onclick="changePage('${kind}',${page-1})">上一页</button><span class="pager-info">第 ${page} / ${totalPages} 页 · 共 ${total} 条</span><button ${disabledLast} onclick="changePage('${kind}',${page+1})">下一页</button><button ${disabledLast} onclick="changePage('${kind}',${totalPages})">末页</button>`;
 }
-function renderCohorts(){
+function combinedScenario(rows,lossPct,tipSol){
+  const row=(rows||[]).find(item=>Number(item.noExitLossPct)===Number(lossPct)&&Number(item.tipSol)===Number(tipSol));
+  return row?.averageNetReturnPct??null;
+}
+function renderStrategies(){
   const rows=[...state.cohorts].sort(compareCohorts);
   const totalPages=pageCount(rows.length);
-  state.cohortPage=Math.min(Math.max(1,state.cohortPage),totalPages);
-  const start=(state.cohortPage-1)*PAGE_SIZE;
+  state.strategyPage=Math.min(Math.max(1,state.strategyPage),totalPages);
+  const start=(state.strategyPage-1)*PAGE_SIZE;
   const visible=rows.slice(start,start+PAGE_SIZE);
   const body=visible.length?visible.map((r,index)=>{
-    const ret=r.averageNetReturnPct;
-    const key=`${r.recoveryProfileId}/${r.entryVariantId}/${r.positionSol}/${r.exitProfileId}`;
-    const model=String(r.quoteModel||'').split('_').at(-1)||'—';
-    const independent=r.resolvedEpisodes??r.resolved??0;
-    const sample=independent<30?'<span class="sample">样本不足</span>':'';
-    const soft=combinedScenario(r.combinedScenarios,-15,0.01);
-    const hard=combinedScenario(r.combinedScenarios,-100,0.01);
-    const isCausal=String(r.recoveryProfileId||'').startsWith('R2-ABS');
-    return `<tr class="${isCausal?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code> <span class="label">${html(model)}</span>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(soft),metric(soft)>0?'good':'bad')}${cell(pct(hard),metric(hard)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="14">暂无策略组合数据</td></tr>';
-  document.querySelector('#cohorts').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>Entry</th><th>NO_ENTRY原因</th><th>Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>胜率</th><th>CLOSED均值</th><th>NO_EXIT=-15% + Jito 0.01</th><th>NO_EXIT=-100% + Jito 0.01</th><th>PF</th><th>最差5%</th></tr>'+body;
-  pager('#cohort-pager','cohort',state.cohortPage,totalPages,rows.length);
-}
-function renderShadowCohorts(){
-  const rows=[...state.shadowCohorts].sort(compareCohorts);
-  const totalPages=pageCount(rows.length);
-  state.shadowPage=Math.min(Math.max(1,state.shadowPage),totalPages);
-  const start=(state.shadowPage-1)*PAGE_SIZE;
-  const visible=rows.slice(start,start+PAGE_SIZE);
-  const body=visible.length?visible.map((r,index)=>{
-    const ret=r.averageNetReturnPct;
-    const profile=r.entryProfileId||`Rank#${r.targetRank}`;
-    const stage=r.cohortStage||'LEGACY';
-    const candidate=r.candidateProfileId?`${r.candidateProfileId}/${r.candidateCohortStage}`:null;
-    const key=`${candidate||`${profile}/${stage}`}/Rank#${r.targetRank}/${r.positionSol}SOL/${r.exitHorizonMs}ms`;
-    const independent=r.resolvedEpisodes??r.resolved??0;
-    const sample=independent<30?'<span class="sample">样本不足</span>':'';
-    const quick15=combinedScenario(r.quickExitCombinedScenarios,-15,0.01);
-    const rescue15=combinedScenario(r.combinedScenarios,-15,0.01);
-    const rescue100=combinedScenario(r.combinedScenarios,-100,0.01);
-    const rescue=`5s ${r.rescue5sFilled||0} · 10s ${r.rescue10sFilled||0}`;
-    const primaryHold=r.primaryHoldP50Ms==null?'—':`${fmt(r.primaryHoldP50Ms,0)}/${fmt(r.primaryHoldP95Ms,0)}ms`;
-    return `<tr class="${profile==='R2-A1'?'primary':''}"><td><span class="rank">#${start+index+1}</span><code>${html(key)}</code>${sample}</td>${cell(r.scheduled)}${cell(independent)}${cell(fmt(r.averageTriggerBuySol,2))}${cell(pct(r.entryFillRatePct))}${cell(noEntryReasons(r))}${cell(pct(r.primaryExitFillRatePct))}${cell(primaryHold)}${cell(pct(r.exitFillRatePct))}${cell(pct(r.noExitRatePct))}${cell(noExitReasons(r))}${cell(rescue)}${cell(r.rescueUnresolved||0,metric(r.rescueUnresolved)>0?'bad':'')}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(ret),metric(ret)>0?'good':metric(ret)<0?'bad':'')}${cell(pct(quick15),metric(quick15)>0?'good':'bad')}${cell(pct(rescue15),metric(rescue15)>0?'good':'bad')}${cell(pct(rescue100),metric(rescue100)>0?'good':'bad')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}${cell('理论','bad')}</tr>`;
-  }).join(''):'<tr><td class="empty" colspan="21">暂无 Same-Slot Shadow 数据</td></tr>';
-  document.querySelector('#same-slot-shadow').innerHTML='<tr><th>排名 / 组合</th><th>计划</th><th>独立CLOSED</th><th>首买SOL</th><th>理论Entry</th><th>NO_ENTRY原因</th><th>主Exit</th><th>主退出持有 P50/P95</th><th>含救援Exit</th><th>NO_EXIT</th><th>NO_EXIT原因</th><th>应急Exit</th><th>应急未解</th><th>胜率</th><th>CLOSED均值</th><th>主窗口失败=-15% + Jito 0.01</th><th>含救援NO_EXIT=-15% + Jito 0.01</th><th>含救援NO_EXIT=-100% + Jito 0.01</th><th>PF</th><th>最差5%</th><th>可执行性</th></tr>'+body;
-  pager('#same-slot-shadow-pager','shadow',state.shadowPage,totalPages,rows.length);
+    const resolved=r.resolvedEpisodes??r.resolved??0;
+    const sample=resolved<30?'<span class="sample">样本不足</span>':'';
+    const fullLoss=combinedScenario(r.combinedScenarios,-100,0);
+    const raw=`${r.recoveryProfileId}/${r.entryVariantId}/${r.exitProfileId}`;
+    return `<tr><td title="${html(raw)}"><span class="rank">#${start+index+1}</span><code>${html(signalLabel(r.recoveryProfileId))}</code>${sample}</td>${cell(entryLabel(r.entryVariantId))}${cell(exitLabel(r.exitProfileId))}${cell(`${fmt(r.positionSol,0)} SOL`)}${cell(resolved)}${cell(pct(r.entryFillRatePct))}${cell(pct(r.exitFillRatePct))}${cell(pct(r.winRatePct),metric(r.winRatePct)>0?'good':'')}${cell(pct(r.averageNetReturnPct),metric(r.averageNetReturnPct)>0?'good':metric(r.averageNetReturnPct)<0?'bad':'')}${cell(pct(r.medianNetReturnPct))}${cell(noEntryReasons(r))}${cell(noExitReasons(r))}${cell(pct(fullLoss),metric(fullLoss)>0?'good':metric(fullLoss)<0?'bad':'')}${cell(fmt(r.profitFactor))}${cell(pct(r.worst5PctAverage),'bad')}</tr>`;
+  }).join(''):'<tr><td class="empty" colspan="15">暂无达标砸单策略数据</td></tr>';
+  document.querySelector('#strategies').innerHTML='<tr><th>排名 / 砸单桶</th><th>入场</th><th>退出管理</th><th>仓位</th><th>独立已结束事件</th><th>入场率</th><th>退出率</th><th>胜率</th><th>平均净收益</th><th>中位净收益</th><th>NO_ENTRY原因</th><th>NO_EXIT原因</th><th>NO_EXIT全损均值</th><th>PF</th><th>最差5%</th></tr>'+body;
+  pager('#strategy-pager','strategy',state.strategyPage,totalPages,rows.length);
 }
 function renderDumps(result){
   state.dumpPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.valid_buy_sol,3))}${cell(r.unique_buyers)}${cell(fmt(r.absorption_score,1),metric(r.absorption_score)>=60?'good':'')}${cell(pricePct(r.max_recovery_pct))}${cell(r.ordering_confidence)}${cell(r.status)}</tr>`).join(''):'<tr><td class="empty" colspan="9">暂无砸盘事件</td></tr>';
-  document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>跌幅</th><th>Sell/Reserve</th><th>有效买入</th><th>买家</th><th>吸收评分</th><th>恢复</th><th>排序</th><th>状态</th></tr>'+body;
+  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.detected_at_ms))} · ${mintLink(r.mint)}</td>${cell(signalLabel(r.signal_profile_id))}${cell(fmt(r.sell_sol,3))}${cell(pct(r.drop_pct),'bad')}${cell(pct(r.sell_to_quote_pct))}${cell(fmt(r.post_quote_sol,2))}${cell(`${r.slot??'?'} / Tx ${r.transaction_index??'?'}`)}${cell(r.status,'good')}</tr>`).join(''):'<tr><td class="empty" colspan="8">暂无达到5 SOL和8%双门槛的砸单</td></tr>';
+  document.querySelector('#dumps').innerHTML='<tr><th>时间 / 合约地址</th><th>信号桶</th><th>砸单SOL</th><th>冲击跌幅</th><th>Sell/Reserve</th><th>卖后Quote</th><th>Slot / 位置</th><th>状态</th></tr>'+body;
   pager('#dump-pager','dump',result.page,result.totalPages,result.total);
 }
-function renderSameSlot(result){
-  state.sameSlotPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.observed_at_ms))} · ${mintLink(r.mint)}</td>${cell(r.classification)}${cell(r.post_dump_buy_rank?`#${r.post_dump_buy_rank}`:'—')}${cell(`${r.dump_transaction_index??'?'}→${r.buy_transaction_index??'?'}`)}${cell(fmt(r.buy_sol,3))}${cell(`${r.receive_lag_ms}ms`)}${cell(pricePct(r.price_bounce_pct))}${cell(r.data_quality_status||'UNASSESSED')}${cell('否','bad')}${cell(r.rejection_reason)}</tr>`).join(''):'<tr><td class="empty" colspan="10">暂无 Same-Slot 观察</td></tr>';
-  document.querySelector('#same-slot').innerHTML='<tr><th>时间 / 合约地址</th><th>分类</th><th>观测排名</th><th>链上Tx位置</th><th>买入 SOL</th><th>接收延迟</th><th>价格反弹</th><th>数据质量</th><th>本系统可执行</th><th>原因</th></tr>'+body;
-  pager('#same-slot-pager','sameSlot',result.page,result.totalPages,result.total);
-}
-function renderWatchedWallets(result){
-  state.walletPage=result.page;
-  const body=result.items.length?result.items.map(r=>`<tr><td>${html(time(r.received_at_ms))} · ${walletLink(r.wallet)}</td><td>${mintLink(r.mint)}</td>${cell(r.side,r.side==='BUY'?'good':'bad')}${cell(fmt(r.sol_amount,3))}${cell(r.slot??'—')}${cell(`${r.transaction_index??'?'}→${r.instruction_index??'?'}`)}<td>${txLink(r.signature)}</td></tr>`).join(''):'<tr><td class="empty" colspan="7">尚未观察到该钱包的PumpSwap成交</td></tr>';
-  document.querySelector('#watched-wallets').innerHTML='<tr><th>时间 / 钱包</th><th>合约地址</th><th>方向</th><th>SOL</th><th>Slot</th><th>Tx→Ix</th><th>交易</th></tr>'+body;
-  pager('#watched-wallets-pager','wallet',result.page,result.totalPages,result.total);
-}
 function changePage(kind,page){
-  if(kind==='cohort'){
-    state.cohortPage=page;
-    renderCohorts();
-    return;
-  }
-  if(kind==='shadow'){
-    state.shadowPage=page;
-    renderShadowCohorts();
-    return;
-  }
-  if(kind==='sameSlot'){
-    state.sameSlotPage=page;
-    refresh();
-    return;
-  }
-  if(kind==='wallet'){
-    state.walletPage=page;
-    refresh();
+  if(kind==='strategy'){
+    state.strategyPage=page;
+    renderStrategies();
     return;
   }
   state.dumpPage=page;
@@ -244,61 +179,60 @@ async function refresh(){
   if(refreshInFlight){refreshQueued=true;return}
   refreshInFlight=true;
   try{
-    const [summaryResult,dumpResult,sameSlotResult,walletResult,healthResult]=await Promise.allSettled([
-      fetchJson('/api/summary'),fetchJson(`/api/dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`),
-      fetchJson(`/api/same-slot?page=${state.sameSlotPage}&pageSize=${PAGE_SIZE}`),fetchJson(`/api/watched-wallets?page=${state.walletPage}&pageSize=${PAGE_SIZE}`),fetchJson('/api/health')
+    const [summaryResult,dumpResult,healthResult]=await Promise.allSettled([
+      fetchJson('/api/summary'),
+      fetchJson(`/api/direct-dumps?page=${state.dumpPage}&pageSize=${PAGE_SIZE}`),
+      fetchJson('/api/health'),
     ]);
-    const failed=[summaryResult,dumpResult,sameSlotResult,walletResult,healthResult]
-      .filter(result=>result.status==='rejected').length;
+    const failed=[summaryResult,dumpResult,healthResult].filter(result=>result.status==='rejected').length;
     const health=healthResult.status==='fulfilled'?healthResult.value:{};
+    const stream=health.stream||{};
     document.querySelector('#status').textContent=healthResult.status==='fulfilled'
-      ?`研究模式 · ${health.stream?.state||'运行中'} · ${health.runtime?.status||'CHECKING'}${failed?` · ${failed}项暂不可用`:''}`
+      ?`研究模式 · ${stream.state||'运行中'} · ${health.runtime?.status||'CHECKING'}${failed?` · ${failed}项暂不可用`:''}`
       :`研究模式 · 健康状态暂不可用${failed?` · ${failed}项读取失败`:''}`;
     if(summaryResult.status==='fulfilled'){
-    const summary=summaryResult.value;
-    const d=summary.dumps,s=summary.sameSlotProbe,sh=summary.sameSlotShadow,e=summary.execution,w=summary.walletResearch||{},hs=health.stream||{},pr=health.poolResolver||{};
-    const cards=[['Helius采集',hs.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],['日志/排序合并率',hs.logStatusJoinRatePct==null?'—':pct(hs.logStatusJoinRatePct)],['待合并消息',hs.pendingLogStatusJoins??0],['新池RPC补全',pr.rpcCalls??0],['独立砸盘事件',d.independent],['平均吸收评分',fmt(d.averageAbsorptionScore,1)],['下一Slot确认事件',d.recoveredEpisodes],['同Slot买入事件',s.eventsWithStrictBuy],['R2-A1研究事件',sh.primaryProfileEpisodes],['R2-A1独立币',sh.primaryProfileMints],['Rank#1延迟P50',s.rank1ReceiveLagP50Ms==null?'—':`${fmt(s.rank1ReceiveLagP50Ms,0)}ms`],['Rank#2买单间隔P50',s.rank2InterBuyGapP50Ms==null?'—':`${fmt(s.rank2InterBuyGapP50Ms,0)}ms`],['Shadow平均净收益',pct(sh.averageNetReturnPct)],['观察钱包成交',w.observations||0],['钱包涉及币种',w.mints||0],['钱包同Slot回补',w.sameSlotPostDumpBuys||0],['钱包下一Slot回补',w.nextSlotPostDumpBuys||0],['观测异常已隔离',s.dataQualityQuarantined||0],['真实落地/排名样本','0 / 0']];
-    document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
-    const notices=[];
-    if(hs.receivesFullTransactionMetadata===false)notices.push(`<strong>Helius轻量模式：</strong>只接收PumpSwap日志与交易排序状态，不接收完整交易元数据；已合并 ${hs.joinedLightweightTransactions||0} 笔，应用层负载估算 ${fmt(hs.approximatePayloadMegabytes,1)} MB，池/Mint按需查询 ${pr.rpcCalls||0} 次`);
-    if(hs.receivesFullTransactionMetadata===false&&metric(hs.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(hs.logStatusJoinRatePct)}；部署初期可短暂偏低，持续低于95%时不要用该窗口判断实盘</span>`);
-    if(health.runtime?.recoverySuppressed)notices.push('<span class="warning">Join质量自动恢复已在连续3次失败后暂停；采集仍在运行，稳定健康5分钟后会自动重新启用恢复</span>');
-    notices.push('<strong>Shadow口径：</strong>Rank#1/#2均为理论入场，使用之后第一笔严格因果公开储备作为退出报价；程序不读取实盘私钥、不发送交易，本地探针只用临时Keypair计时');
-    notices.push('<strong>速度口径：</strong>Rank#2余量按“第二笔买单接收时间−第一笔买单接收时间−23ms”计算；仍不包含Leader排队与真实落地时间');
-    notices.push('<strong>宽口径：</strong>跌幅5%–40%、Sell/Reserve≥2%、卖后Quote≥20 SOL即进入研究；R2-A1按首买≥max(0.1 SOL,砸盘额1%)标记');
-    notices.push('<strong>下一Slot：</strong>N1-FB、N1-A5、N1-P2、N1-B2分别记录首个有效买入、吸收5%、反弹2%和两个独立买家的因果入场时点；这些是研究里程碑，不是实盘信号');
-    notices.push('<strong>冻结因果组：</strong>R2-ABS10-V1与R2-ABS5-D15-30-V1只使用大砸单后的首笔严格排序公开买单作为触发；入场等待触发后50/100/200/400ms或下一Slot的首个可观察储备，绝不把触发成交价当作可成交入场价');
-    notices.push(`<strong>观察钱包：</strong>已记录 ${w.observations||0} 笔PumpSwap成交，其中砸盘窗口附近 ${w.aroundDumpTrades||0} 笔；复用当前PumpSwap数据流，不增加单独Helius订阅`);
-    notices.push('<strong>执行测速：</strong>仅测量隔离临时签名器的本地构建、签名和序列化；交易发送硬关闭，因此发送、落地和真实排名必须显示未发送/0样本，禁止用理论值代替');
-    notices.push('<strong>退出分层：</strong>1 SOL测试250/500/1000/2000ms，2/5 SOL只测试250/500ms容量敏感性；5秒/10秒救援单独列示，最终仍无报价才计NO_EXIT');
-    notices.push('<strong>情景收益：</strong>“主窗口失败”把救援退出也按失败处理；“含救援”保留救援实际收益。两者都计Jito 0.01 SOL（买卖各一笔）');
-    if(metric(d.excludedLegacyPriceEvents)>0)notices.push(`<strong>${d.excludedLegacyPriceEvents}</strong> 个旧价格解析事件已隔离，不参与任何策略统计`);
-    if(metric(d.excludedOverMaxDropEvents)>0)notices.push(`<strong>${d.excludedOverMaxDropEvents}</strong> 个跌幅超过40%的RUG候选已排除`);
-    if(metric(d.abnormalRecoveryEvents)>0)notices.push(`<strong>${d.abnormalRecoveryEvents}</strong> 个恢复比例异常事件已从全部策略汇总中隔离，原始行仍保留审计`);
-    if(metric(sh.dataQualityQuarantined)>0)notices.push(`<strong>${sh.dataQualityQuarantined}</strong> 条异常成交额/储备/价格连续性组合已隔离`);
-    if(metric(s.dataQualityQuarantined)>0)notices.push(`<strong>${s.dataQualityQuarantined}</strong> 条异常Same-Slot买单观测已保留审计，但不再污染页面均值、排名和速度统计`);
-    if(metric(sh.coverageHours)<23)notices.push(`<span class="warning">当前Shadow实际覆盖仅 ${fmt(sh.coverageHours,1)} 小时，不是完整24小时</span>`);
-    if(metric(sh.resolvedEpisodes)<100)notices.push(`<span class="warning">Same-Slot Shadow独立已退出事件仅 ${sh.resolvedEpisodes??0}，尚未达到100–300事件研究门槛</span>`);
-    if(metric(sh.largestWinnerEventContributionPct)>50)notices.push(`Shadow最大赢家事件贡献全部正收益的 <strong>${pct(sh.largestWinnerEventContributionPct)}</strong>`);
-    if(metric(e.confirmationsWithoutSimulation)>0)notices.push(`<strong>${e.confirmationsWithoutSimulation}</strong> 个历史确认没有有效模拟记录`);
-    notices.push(`Shadow中的 ${sh.scheduled??0} 条组合记录来自 <strong>${sh.episodes??0}</strong> 个独立砸盘事件，不能把参数组合数当成独立样本`);
-    if(metric(e.scheduled)>0)notices.push(`对照组中的 ${e.scheduled} 条组合记录来自 <strong>${e.simulatedEpisodes??0}</strong> 个独立模拟事件`);
-    document.querySelector('#research-notice').innerHTML=notices.join(' · ');
-    state.cohorts=summary.cohorts||[];
-    state.shadowCohorts=summary.sameSlotShadowCohorts||[];
-    renderShadowCohorts();
-    renderCohorts();
+      const summary=summaryResult.value;
+      const matrix=summary.directDumpMatrix||{};
+      const pool=health.poolResolver||{};
+      const cards=[
+        ['Helius采集',stream.receivesFullTransactionMetadata===false?'轻量日志+排序':'完整交易'],
+        ['日志/排序合并率',stream.logStatusJoinRatePct==null?'—':pct(stream.logStatusJoinRatePct)],
+        ['全网卖出事件',summary.dumps?.independent??0],
+        ['达标砸单',matrix.qualifiedEvents??0],
+        ['运行中策略仓位',matrix.active??0],
+        ['已退出组合',matrix.closed??0],
+        ['策略入场率',pct(matrix.entryFillRatePct)],
+        ['已退出胜率',pct(matrix.winRatePct)],
+        ['平均净收益',pct(matrix.averageNetReturnPct)],
+        ['固定单仓','1 SOL'],
+        ['已出现矩阵单元',`${matrix.observedCohorts??0} / ${matrix.totalMatrixCells??432}`],
+        ['新池RPC补全',pool.rpcCalls??0],
+      ];
+      document.querySelector('#cards').innerHTML=cards.map(([a,b])=>`<div class="card"><div class="label">${a}</div><div class="value">${b??'—'}</div></div>`).join('');
+      const notices=[];
+      notices.push('<strong>唯一研究方向：</strong>只监控迁移后的PumpSwap；不限制AGE，砸单≥5 SOL且单次冲击跌幅≥8%才创建策略仓位');
+      notices.push('<strong>分桶：</strong>砸单规模5–10、10–25、≥25 SOL × 跌幅8–15%、15–30%、≥30%，共9个信号桶');
+      notices.push('<strong>独立加仓：</strong>每次达标砸单都新建独立1 SOL仓位；已有仓位不会被覆盖，每个仓位单独计算入场和退出');
+      notices.push('<strong>入场矩阵：</strong>紧跟砸单后的首个可成交公开报价、延迟100ms、延迟300ms；砸单本身不能作为E0成交价');
+      notices.push('<strong>退出矩阵：</strong>买入后5秒内+3%/+5%快速止盈，+2%回撤1%或+4%回撤2%的移动止盈，最长30秒/5分钟，并对比无固定止损与-12%止损');
+      notices.push('<strong>规模：</strong>每个达标砸单测试48个入场×退出组合，9个信号桶合计432个矩阵单元；参数组合数不能当成独立事件数');
+      notices.push('<strong>成本：</strong>直接矩阵默认单边基础费0.000005 SOL、优先费0.0001 SOL、Jito 0；仍计PumpSwap费率和滑点');
+      notices.push('<strong>安全边界：</strong>当前仅研究模拟，不读取实盘私钥、不发送交易；Dashboard收益不是实盘成交证明');
+      if(metric(matrix.qualifiedEvents)<30)notices.push(`<span class="warning">当前达标独立砸单仅 ${matrix.qualifiedEvents??0} 个，任何胜率和收益都属于小样本</span>`);
+      if(stream.receivesFullTransactionMetadata===false&&metric(stream.logStatusJoinRatePct)<95)notices.push(`<span class="warning">日志/排序合并率当前为 ${pct(stream.logStatusJoinRatePct)}，持续偏低时不要据此判断策略</span>`);
+      document.querySelector('#research-notice').innerHTML=notices.join(' · ');
+      state.cohorts=(summary.directDumpCohorts||[]).filter(row=>row.quoteModel==='PUMPSWAP_DIRECT_DUMP_MANAGED_V1');
+      renderStrategies();
     }
-    if(sameSlotResult.status==='fulfilled')renderSameSlot(sameSlotResult.value);
-    if(walletResult.status==='fulfilled')renderWatchedWallets(walletResult.value);
     if(dumpResult.status==='fulfilled')renderDumps(dumpResult.value);
-  }catch(e){document.querySelector('#status').textContent=`读取失败: ${e.message}`}
+  }catch(error){document.querySelector('#status').textContent=`读取失败: ${error.message}`}
   finally{
     refreshInFlight=false;
     if(refreshQueued){refreshQueued=false;setTimeout(refresh,0)}
   }
 }
-refresh(); setInterval(refresh,10000);
+refresh();
+setInterval(refresh,10000);
 </script>
 </body>
 </html>

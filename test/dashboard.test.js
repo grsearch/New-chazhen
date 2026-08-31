@@ -29,7 +29,7 @@ test('cohorts sort by win rate and then average net return', () => {
   assert.equal(eventStats.largestWinnerEventContributionPct, 100);
 });
 
-test('dashboard script parses and exposes paginated GMGN views', () => {
+test('dashboard only exposes the direct-dump managed matrix', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'server', 'public', 'index.html'), 'utf8',
   );
@@ -42,37 +42,28 @@ test('dashboard script parses and exposes paginated GMGN views', () => {
   assert.doesNotMatch(source, /Promise\.all\(\[/);
   assert.match(source, /const PAGE_SIZE=20/);
   assert.match(source, /pageSize=\$\{PAGE_SIZE\}/);
-  assert.match(source, /same-slot\?page=\$\{state\.sameSlotPage\}&pageSize=\$\{PAGE_SIZE\}/);
-  assert.match(source, /id="same-slot-pager"/);
-  assert.match(source, /id="same-slot-shadow-pager"/);
-  assert.match(source, /id="watched-wallets-pager"/);
-  assert.match(source, /watched-wallets\?page=\$\{state\.walletPage\}/);
-  assert.match(source, /同 Slot Shadow 组合/);
-  assert.match(source, /R2-A1宽口径主研究/);
-  assert.match(source, /真实落地\/排名样本','0 \/ 0'/);
-  assert.match(source, /Rank#2买单间隔P50/);
-  assert.match(source, /含救援NO_EXIT=-15% \+ Jito 0\.01/);
-  assert.match(source, /Jito 0\.01/);
-  assert.match(source, /Rank#\$\{r\.targetRank\}/);
-  assert.match(source, /Shadow平均净收益/);
-  assert.match(source, /Rank#1延迟P50/);
-  assert.match(source, /<th>观测排名<\/th>/);
-  assert.match(source, /<th>链上Tx位置<\/th>/);
-  assert.match(source, /R2-A1研究事件/);
-  assert.match(source, /下一Slot确认事件/);
-  assert.match(source, /观察钱包成交/);
-  assert.match(source, /吸收评分/);
-  assert.match(source, /<th>主Exit<\/th>/);
-  assert.match(source, /主退出持有 P50\/P95/);
-  assert.match(source, /主窗口失败=-15% \+ Jito 0\.01/);
-  assert.match(source, /观测异常已隔离/);
-  assert.match(source, /数据异常\/旧解析/);
+  assert.match(source, /direct-dumps\?page=\$\{state\.dumpPage\}&pageSize=\$\{PAGE_SIZE\}/);
+  assert.match(source, /id="strategy-pager"/);
+  assert.match(source, /id="dump-pager"/);
+  assert.match(source, /PumpSwap 迁移后砸单反弹矩阵/);
+  assert.match(source, /砸单≥5 SOL/);
+  assert.match(source, /冲击跌幅≥8%/);
+  assert.match(source, /每个策略仓位固定1 SOL/);
+  assert.match(source, /PUMPSWAP_DIRECT_DUMP_MANAGED_V1/);
+  assert.match(source, /紧跟砸单后的首个可成交报价/);
+  assert.match(source, /延迟100ms/);
+  assert.match(source, /延迟300ms/);
+  assert.match(source, /移动回撤/);
+  assert.match(source, /最长30秒\/5分钟/);
+  assert.match(source, /NO_EXIT全损均值/);
+  assert.match(source, /固定单仓','1 SOL'/);
+  assert.doesNotMatch(source, /Same-Slot|同 Slot Shadow|R2-A1|观察钱包|后续Slot恢复策略/);
+  assert.doesNotMatch(source, /api\/same-slot|api\/watched-wallets/);
   assert.match(source, /const metric=v=>v==null\|\|v===''\?null/);
-  assert.match(source, /<th>独立CLOSED<\/th>/);
+  assert.match(source, /<th>独立已结束事件<\/th>/);
   assert.match(source, /<th>NO_ENTRY原因<\/th>/);
   assert.match(source, /<th>NO_EXIT原因<\/th>/);
   assert.match(source, /胜率 ↓ · 平均净收益 ↓/);
-  assert.match(source, /最大赢家事件贡献/);
   assert.match(source, /https:\/\/gmgn\.ai\/sol\/token\/\$\{encodeURIComponent\(value\)\}/);
   assert.match(source, /target="_blank" rel="noopener noreferrer"/);
 });
@@ -87,6 +78,16 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   `);
   for (let index = 0; index < 23; index += 1) {
     insert.run(`episode-${index}`, `mint-${index}`, `pool-${index}`, index, 'STRICT', index);
+  }
+  const insertConfirmation = store.db.prepare(`
+    INSERT INTO confirmations(
+      confirmation_id,episode_id,profile_id,confirmed_at_ms,ordering_confidence,snapshot_json
+    ) VALUES(?,?,?,?,?,'{}')
+  `);
+  for (let index = 0; index < 23; index += 1) {
+    insertConfirmation.run(
+      `direct-${index}`, `episode-${index}`, 'DBM-S-D8', index, 'STRICT',
+    );
   }
   const insertWatched = store.db.prepare(`
     INSERT INTO watched_wallet_trades(
@@ -128,6 +129,16 @@ test('dashboard dump endpoint returns pagination metadata', async (context) => {
   assert.equal(result.totalPages, 3);
   assert.equal(result.items.length, 10);
   assert.equal(result.items[0].episode_id, 'episode-12');
+
+  const directResponse = await fetch(
+    `http://127.0.0.1:${port}/api/direct-dumps?page=2&pageSize=10`,
+  );
+  assert.equal(directResponse.status, 200);
+  const direct = await directResponse.json();
+  assert.equal(direct.page, 2);
+  assert.equal(direct.total, 23);
+  assert.equal(direct.items.length, 10);
+  assert.equal(direct.items[0].signal_profile_id, 'DBM-S-D8');
 
   const sameSlotResponse = await fetch(
     `http://127.0.0.1:${port}/api/same-slot?page=2&pageSize=10`,

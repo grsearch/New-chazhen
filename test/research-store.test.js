@@ -704,3 +704,67 @@ test('invalid V1/V2/V3 simulations can be removed without deleting V4 research d
   assert.deepEqual(remaining, [{ simulation_id: 'v4' }]);
   store.close();
 });
+
+test('direct-only cleanup removes retired strategy rows and preserves the managed matrix', () => {
+  const directModel = 'PUMPSWAP_DIRECT_DUMP_MANAGED_V1';
+  const store = new ResearchStore({
+    dbPath: ':memory:', flushMs: 60_000, batchMax: 1_000,
+    directDumpQuoteModel: directModel,
+  });
+  store.db.prepare(`
+    INSERT INTO dump_events(
+      episode_id,mint,pool,detected_at_ms,ordering_confidence,
+      matched_dump_profiles_json,status,toxic_rejected,sell_sol,drop_pct,updated_at_ms
+    ) VALUES('episode','mint','pool',1,'STRICT','[]','MATRIX_QUALIFIED',0,6,9,1)
+  `).run();
+  const confirmation = store.db.prepare(`
+    INSERT INTO confirmations(
+      confirmation_id,episode_id,profile_id,confirmed_at_ms,ordering_confidence,snapshot_json
+    ) VALUES(?,?,?,?,?,'{}')
+  `);
+  confirmation.run('direct-confirmation', 'episode', 'DBM-S-D8', 1, 'STRICT');
+  confirmation.run('legacy-confirmation', 'episode', 'N1-FB', 1, 'STRICT');
+  const simulation = store.db.prepare(`
+    INSERT INTO simulations(
+      simulation_id,confirmation_id,episode_id,recovery_profile_id,entry_variant_id,
+      entry_kind,entry_delay_ms,exit_profile_id,position_sol,quote_model,status,
+      confirmed_at_ms,entry_at_ms,net_return_pct,created_at_ms,updated_at_ms
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `);
+  simulation.run(
+    'direct', 'direct-confirmation', 'episode', 'DBM-S-D8', 'E0', 'DELAY', 0,
+    'TP3-TR2D1-H30-SLN', 1, directModel, 'CLOSED', 1, 2, 5, 1, 3,
+  );
+  simulation.run(
+    'legacy', 'legacy-confirmation', 'episode', 'N1-FB', 'E100', 'DELAY', 100,
+    'H1', 2, 'PUMPSWAP_CPMM_CAUSAL_CAPACITY_V4', 'NO_ENTRY', 1, null, null, 1, 3,
+  );
+  store.db.prepare(`
+    INSERT INTO watched_wallet_trades(
+      observation_id,wallet,received_at_ms,event_index,signature,ordering_confidence,side
+    ) VALUES('wallet-row','wallet',1,0,'signature','STRICT','BUY')
+  `).run();
+  store.db.prepare(`
+    INSERT INTO same_slot_observations(
+      observation_id,episode_id,mint,pool,observed_at_ms,slot,event_index,
+      classification,receive_lag_ms,buy_sol,executable,rejection_reason
+    ) VALUES('same-slot-row','episode','mint','pool',1,1,0,'STRICT_AFTER_DUMP',1,1,0,'LEGACY')
+  `).run();
+
+  const removed = store.deleteLegacyStrategyData(directModel);
+  assert.equal(removed.simulations, 1);
+  assert.equal(removed.confirmations, 1);
+  assert.equal(removed.watchedWalletTrades, 1);
+  assert.equal(removed.sameSlotObservations, 1);
+  assert.deepEqual(
+    store.db.prepare('SELECT simulation_id FROM simulations').all(),
+    [{ simulation_id: 'direct' }],
+  );
+  const summary = store.summary();
+  assert.equal(summary.directDumpMatrix.qualifiedEvents, 1);
+  assert.equal(summary.directDumpMatrix.closed, 1);
+  assert.equal(summary.directDumpMatrix.averageNetReturnPct, 5);
+  assert.equal(summary.directDumpCohorts.length, 1);
+  assert.equal(summary.directDumpCohorts[0].quoteModel, directModel);
+  store.close();
+});

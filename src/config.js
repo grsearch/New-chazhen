@@ -219,7 +219,9 @@ const config = {
     ]),
   },
   recovery: {
-    enabled: boolean('SDBR_RECOVERY_RESEARCH_ENABLED', false),
+    // Legacy next-slot recovery research is retained only for historical
+    // database/export compatibility. Production runs the direct dump matrix.
+    enabled: false,
     maxObservationMs: 20_000,
     maxSlotDelta: 40,
     minValidBuySol: number('SDBR_MIN_VALID_BUY_SOL', 0.1, { min: 0.000001 }),
@@ -279,12 +281,10 @@ const config = {
     ],
   },
   walletResearch: {
-    enabled: boolean('SDBR_WALLET_RESEARCH_ENABLED', true),
-    // These trades are already present in the PumpSwap program stream, so this
-    // adds no second Helius subscription and no RPC polling.
-    wallets: new Set(list('SDBR_WATCH_WALLETS', [
-      'popo3Rj6arKNttyUFpWfbkv2gG8uS13TGtmH6JPMuHz',
-    ])),
+    // The observation-wallet experiment is retired. Keep the shape so old
+    // exports and focused unit tests remain readable, but never collect it.
+    enabled: false,
+    wallets: new Set(),
   },
   dumpBounceMatrix: Object.freeze({
     enabled: boolean('SDBR_DUMP_BOUNCE_MATRIX_ENABLED', true),
@@ -309,7 +309,9 @@ const config = {
     }),
   }),
   sameSlotShadow: {
-    enabled: boolean('SDBR_SAME_SLOT_SHADOW_ENABLED', false),
+    // Retired in favour of the post-migration direct-dump managed matrix.
+    // Intentionally not environment-overridable, so an old .env cannot revive it.
+    enabled: false,
     targetRanks: [1, 2],
     primaryProfileId: 'R2-A1',
     primaryCohortStage: 'BROAD_RESEARCH_V1',
@@ -383,7 +385,8 @@ const config = {
     }),
   },
   causalBackrun: Object.freeze({
-    enabled: boolean('SDBR_CAUSAL_BACKRUN_ENABLED', false),
+    // Frozen legacy research definitions remain export-readable but inactive.
+    enabled: false,
     // Frozen forward-validation cohorts.  These are intentionally not
     // configurable through env vars, so tomorrow's sample cannot be tuned
     // after seeing its outcome.

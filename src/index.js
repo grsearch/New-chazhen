@@ -23,7 +23,16 @@ async function main() {
     sameSlotJitoTipScenariosSol: config.sameSlotShadow.jitoTipScenariosSol,
     sameSlotCandidate: config.sameSlotShadow.candidate,
     maxReportedRecoveryPct: config.recovery.maxReportedRecoveryPct,
+    directDumpQuoteModel: config.dumpBounceMatrix.quoteModel,
   });
+  const removedLegacyStrategyData = store.deleteLegacyStrategyData(
+    config.dumpBounceMatrix.quoteModel,
+  );
+  const removedLegacyRows = Object.values(removedLegacyStrategyData)
+    .reduce((sum, count) => sum + count, 0);
+  if (removedLegacyRows > 0) {
+    console.log(`Removed ${removedLegacyRows} rows from retired strategy modules.`);
+  }
   const removedInvalidFeeSimulations = store.deleteSimulationsByQuoteModels([
     'PUMPSWAP_CPMM_EVENT_FEES_V1',
     'PUMPSWAP_CPMM_EXECUTABLE_FEES_V2',
